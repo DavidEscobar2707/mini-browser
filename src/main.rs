@@ -87,9 +87,94 @@ fn allow_http_https_only(url: String) -> bool {
         || url.starts_with("data:text/html")
 }
 
+impl App {
+    fn set_chrome_url(&self, url: &str) {
+        let js = format!("window.setUrl({})", serde_json::to_string(url).unwrap());
+        let _ = self.chrome.evaluate_script(&js);
+    }
+
+    fn set_chrome_title(&self, title: &str) {
+        let js = format!("window.setTitle({})", serde_json::to_string(title).unwrap());
+        let _ = self.chrome.evaluate_script(&js);
+    }
+
+    /// SPEC.md §4 omnibox; SPEC.md §7 {"cmd":"navigate","text":…}
+    fn navigate(&mut self, raw: &str) {
+        if let Some(url) = omnibox::resolve(raw) {
+            let _ = self.content.load_url(&url);
+            self.on_start = false;
+            let _ = self.fab.set_visible(true);
+            self.set_chrome_url(&url);
+            let _ = self.content.focus();
+        }
+        // None -> ignored/rejected: empty, javascript:, file:, …
+    }
+
+    /// SPEC.md §4: FAB / Alt+Home -> start page, hide FAB, reset chrome title/url.
+    fn go_home(&mut self) {
+        let _ = self.content.load_html(include_str!("../ui/start.html"));
+        self.on_start = true;
+        let _ = self.fab.set_visible(false);
+        self.set_chrome_title("Mini");
+        self.set_chrome_url("");
+        let _ = self.chrome.focus();
+    }
+}
+
 fn handle_key(_app: &mut App, _key: &Key<'_>, _cf: &mut ControlFlow) {}
 
-fn handle_msg(_app: &mut App, _msg: Msg, _control_flow: &mut ControlFlow) {}
+#[derive(serde::Deserialize)]
+struct IpcCmd {
+    cmd: String,
+    #[serde(default)]
+    text: Option<String>,
+}
+
+fn handle_msg(app: &mut App, msg: Msg, control_flow: &mut ControlFlow) {
+    match msg {
+        Msg::ChromeIpc(body) | Msg::FabIpc(body) => {
+            if let Ok(c) = serde_json::from_str::<IpcCmd>(&body) {
+                match c.cmd.as_str() {
+                    "navigate" => app.navigate(c.text.as_deref().unwrap_or("")),
+                    "drag" => {
+                        let _ = app.window.drag_window();
+                    }
+                    "minimize" => app.window.set_minimized(true),
+                    "maximize" => app.window.set_maximized(!app.window.is_maximized()),
+                    "close" => *control_flow = ControlFlow::Exit,
+                    "home" => app.go_home(),
+                    _ => {} // unknown cmd -> ignore (SPEC.md §7)
+                }
+            }
+        }
+        Msg::ContentIpc(_body) => {}                          // Task 8
+        Msg::TitleChanged(title) => {
+            // Start page: SPEC.md §4 title pill is "Mini". WebView2 reports "about:blank"
+            // after load_html; Task 8 replaces this arm.
+            if app.on_start {
+                app.set_chrome_title("Mini");
+            } else {
+                let label = if title.is_empty() {
+                    omnibox::host_of(&app.content.url().unwrap_or_default())
+                } else {
+                    title
+                };
+                app.set_chrome_title(&label);                 // provisional; refined in Task 8
+            }
+        }
+        Msg::PageLoad(_, url) => {
+            // Start page: SPEC.md §4 URL field empty. WebView2 reports about:blank / data:text/html.
+            if app.on_start {
+                app.set_chrome_url("");
+            } else {
+                app.set_chrome_url(&url);
+            }
+        }
+        Msg::NewWindow(url) => {
+            let _ = app.content.load_url(&url); // in-place; Deny already returned
+        }
+    }
+}
 
 fn main() {
     profile::ensure_dirs();
