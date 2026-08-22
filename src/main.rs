@@ -10,11 +10,39 @@ use tao::platform::windows::WindowBuilderExtWindows;
 use tao::window::{Icon, Window, WindowBuilder};
 use wry::{NewWindowResponse, PageLoadEvent, Rect, WebContext, WebView, WebViewBuilder, WebViewBuilderExtWindows};
 
+// Privileged content script. Child WebView2 HWNDs swallow WM_KEYDOWN, so tao
+// handle_key never sees F5/Ctrl+R/Alt+Left/Right/Alt+Home while a webview is
+// focused (the normal case). Same pattern as SPEC.md §3 Ctrl+L.
 const CTRL_L_SCRIPT: &str = r#"
 document.addEventListener('keydown', (e) => {
-  if (e.ctrlKey && !e.shiftKey && !e.altKey && e.key === 'l') {
+  if (e.ctrlKey && !e.shiftKey && !e.altKey && (e.key === 'l' || e.key === 'L')) {
     e.preventDefault();
     window.ipc.postMessage('{"cmd":"focus-url"}');
+  } else if (e.key === 'F5') {
+    e.preventDefault();
+    location.reload();
+  } else if (e.ctrlKey && !e.altKey && (e.key === 'r' || e.key === 'R')) {
+    e.preventDefault();
+    location.reload();
+  } else if (e.altKey && !e.ctrlKey && e.key === 'ArrowLeft') {
+    e.preventDefault();
+    history.back();
+  } else if (e.altKey && !e.ctrlKey && e.key === 'ArrowRight') {
+    e.preventDefault();
+    history.forward();
+  } else if (e.altKey && !e.ctrlKey && e.key === 'Home') {
+    e.preventDefault();
+    window.ipc.postMessage('{"cmd":"home"}');
+  }
+}, true);
+"#;
+
+// Chrome HWND is also a child webview. Alt+Home uses existing chrome "home" IPC.
+const CHROME_KEY_SCRIPT: &str = r#"
+document.addEventListener('keydown', (e) => {
+  if (e.altKey && !e.ctrlKey && e.key === 'Home') {
+    e.preventDefault();
+    window.ipc.postMessage('{"cmd":"home"}');
   }
 }, true);
 "#;
@@ -119,9 +147,38 @@ impl App {
         self.set_chrome_url("");
         let _ = self.chrome.focus();
     }
+
+    /// True while content shows the null-origin start page (not an http(s) site).
+    fn content_on_start_page(&self) -> bool {
+        match self.content.url() {
+            Ok(u) => !(u.starts_with("http://") || u.starts_with("https://")),
+            Err(_) => true,
+        }
+    }
 }
 
-fn handle_key(_app: &mut App, _key: &Key<'_>, _cf: &mut ControlFlow) {}
+fn handle_key(app: &mut App, key: &Key<'_>, _cf: &mut ControlFlow) {
+    // tao 0.37 has no NamedKey: named keys are Key::F5 / ArrowLeft / Home (Task 6).
+    // mods.ctrl()/alt() are control_key()/alt_key() on this crate.
+    let ctrl = app.mods.control_key();
+    let alt = app.mods.alt_key();
+    match key {
+        Key::F5 => {
+            let _ = app.content.reload();
+        }
+        Key::Character("r") if ctrl => {
+            let _ = app.content.reload();
+        }
+        Key::ArrowLeft if alt && !ctrl => {
+            let _ = app.content.go_back(); // errors ignored when history empty (SPEC.md §4)
+        }
+        Key::ArrowRight if alt && !ctrl => {
+            let _ = app.content.go_forward();
+        }
+        Key::Home if alt && !ctrl => app.go_home(),
+        _ => {}
+    }
+}
 
 #[derive(serde::Deserialize)]
 struct IpcCmd {
@@ -147,19 +204,34 @@ fn handle_msg(app: &mut App, msg: Msg, control_flow: &mut ControlFlow) {
                 }
             }
         }
-        Msg::ContentIpc(_body) => {}                          // Task 8
+        Msg::ContentIpc(body) => {
+            if let Ok(c) = serde_json::from_str::<IpcCmd>(&body) {
+                match c.cmd.as_str() {
+                    "focus-url" => {
+                        let _ = app.chrome.focus();
+                        let _ = app.chrome.evaluate_script("window.focusUrl()");
+                    }
+                    "navigate" if app.content_on_start_page() => {
+                        app.navigate(c.text.as_deref().unwrap_or(""))
+                    }
+                    // Privileged init script posts this for Alt+Home. XSS can
+                    // also send it (forces start page; not a navigate channel).
+                    "home" => app.go_home(),
+                    _ => {} // everything else from content: ignored
+                }
+            }
+        }
         Msg::TitleChanged(title) => {
-            // Start page: SPEC.md §4 title pill is "Mini". WebView2 reports "about:blank"
-            // after load_html; Task 8 replaces this arm.
+            // SPEC.md §4: start-page title pill is "Mini". WebView2 reports
+            // "about:blank" after load_html (non-empty), so the empty-title
+            // fallback never fires. Skip that junk while on_start.
             if app.on_start {
                 app.set_chrome_title("Mini");
+            } else if !title.is_empty() {
+                app.set_chrome_title(&title);
             } else {
-                let label = if title.is_empty() {
-                    omnibox::host_of(&app.content.url().unwrap_or_default())
-                } else {
-                    title
-                };
-                app.set_chrome_title(&label);                 // provisional; refined in Task 8
+                let host = omnibox::host_of(&app.content.url().unwrap_or_default());
+                app.set_chrome_title(&host);
             }
         }
         Msg::PageLoad(_, url) => {
@@ -270,6 +342,7 @@ fn main() {
             .with_html(include_str!("../ui/chrome.html"))
             .with_bounds(rc)
             .with_focused(false)
+            .with_initialization_script(CHROME_KEY_SCRIPT)
             .with_ipc_handler(move |request| {
                 let _ = send(Msg::ChromeIpc(request.body().clone()));
             })
