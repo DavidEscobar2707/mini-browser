@@ -1,0 +1,48 @@
+<!doctype html>
+<html>
+<head>
+<meta charset="utf-8">
+<style>
+  html, body { margin:0; height:100%; overflow:hidden; background:#f5f5f5;
+               font-family:"Segoe UI", system-ui, sans-serif; user-select:none; }
+  #bar { display:flex; align-items:center; gap:8px; height:40px; box-sizing:border-box; padding-left:12px; }
+  #title { max-width:230px; padding:3px 10px; border-radius:999px; background:#e7e7e7;
+           font-size:12px; color:#333; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+  #url { flex:1; min-width:60px; height:26px; border:none; border-radius:999px; padding:0 12px;
+         font-size:13px; background:#fff; color:#111; outline:none; }
+  .cap { width:46px; height:40px; border:none; background:transparent; padding:0;
+         display:flex; align-items:center; justify-content:center; }
+  .cap:hover { background:#e0e0e0; }
+  #close:hover { background:#e81123; }
+  #close:hover svg { stroke:#fff; }
+  svg { stroke:#444; fill:none; stroke-width:1; }
+</style>
+</head>
+<body>
+<div id="bar">
+  <span id="title">Mini</span>
+  <input id="url" spellcheck="false" autocomplete="off">
+  <button class="cap" id="btn-min" title="Minimize"><svg width="10" height="10" viewBox="0 0 10 10"><path d="M0 5H10"/></svg></button>
+  <button class="cap" id="btn-max" title="Maximize"><svg width="10" height="10" viewBox="0 0 10 10"><rect x="0.5" y="0.5" width="9" height="9"/></svg></button>
+  <button class="cap" id="close" title="Close"><svg width="10" height="10" viewBox="0 0 10 10"><path d="M0 0L10 10 M10 0L0 10"/></svg></button>
+</div>
+<script>
+  const post = (msg) => window.ipc.postMessage(msg);
+  document.getElementById('url').addEventListener('keydown', (e) => {
+    if (e.key === 'Enter') post(JSON.stringify({ cmd: 'navigate', text: e.target.value }));
+  });
+  window.setTitle = (t) => { document.getElementById('title').textContent = t; };
+  window.setUrl = (u) => { document.getElementById('url').value = u; };
+  window.focusUrl = () => { document.getElementById('url').focus(); document.getElementById('url').select(); };
+  for (const [id, cmd] of [['btn-min','minimize'], ['btn-max','maximize'], ['close','close']])
+    document.getElementById(id).addEventListener('click', () => post(JSON.stringify({ cmd })));
+  document.body.addEventListener('mousedown', (e) => {
+    if (e.target.id === 'url' || e.target.closest('.cap')) return;
+    if (e.button === 0) post(JSON.stringify({ cmd: 'drag' }));
+  });
+  document.addEventListener('keydown', (e) => {
+    if (e.ctrlKey && !e.shiftKey && !e.altKey && e.key === 'l') { e.preventDefault(); focusUrl(); }
+  });
+</script>
+</body>
+</html>

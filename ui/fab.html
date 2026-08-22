@@ -1,0 +1,24 @@
+<!doctype html>
+<html>
+<head>
+<meta charset="utf-8">
+<style>
+  html, body { margin:0; height:100%; background:transparent; overflow:hidden; }
+  #fab { width:48px; height:48px; border-radius:14px; background:#141414; cursor:default;
+         display:flex; align-items:center; justify-content:center; }
+  svg { stroke:#ffffff; fill:none; }
+</style>
+</head>
+<body>
+<div id="fab">
+  <svg width="22" height="22" viewBox="0 0 24 24" stroke-width="2"
+       stroke-linecap="round" stroke-linejoin="round">
+    <path d="M3 11l9-8 9 8"/><path d="M5 10v10h14V10"/>
+  </svg>
+</div>
+<script>
+  document.getElementById('fab').addEventListener('click',
+    () => window.ipc.postMessage('{"cmd":"home"}'));
+</script>
+</body>
+</html>

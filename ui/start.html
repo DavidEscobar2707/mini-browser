@@ -1,0 +1,23 @@
+<!doctype html>
+<html>
+<head>
+<meta charset="utf-8">
+<style>
+  html, body { margin:0; height:100%; background:#ffffff;
+               font-family:"Segoe UI", system-ui, sans-serif; }
+  body { display:flex; align-items:center; justify-content:center; }
+  input { width:min(520px, 80vw); height:38px; border:1px solid #ddd; border-radius:999px;
+          padding:0 18px; font-size:15px; color:#111; outline:none; text-align:center; }
+  input:focus { border-color:#888; }
+</style>
+</head>
+<body>
+<input id="q" placeholder="Enter URL or search…" spellcheck="false" autocomplete="off" autofocus>
+<script>
+  document.getElementById('q').addEventListener('keydown', (e) => {
+    if (e.key === 'Enter')
+      window.ipc.postMessage(JSON.stringify({ cmd: 'navigate', text: e.target.value }));
+  });
+</script>
+</body>
+</html>
