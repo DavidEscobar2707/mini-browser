@@ -1,0 +1,36 @@
+name: ship
+
+on:
+  schedule:
+    - cron: "0 6 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  ship:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: stable
+          targets: x86_64-pc-windows-msvc
+      - name: Test
+        run: cargo test
+      - name: Release build
+        run: cargo build --release
+      - name: Date tag
+        id: date
+        shell: bash
+        run: echo "tag=$(date -u +%Y.%m.%d)" >> "$GITHUB_OUTPUT"
+      - name: Publish mini.exe
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ steps.date.outputs.tag }}
+          name: Mini ${{ steps.date.outputs.tag }}
+          body: Daily Windows build. One exe. Pin to the taskbar.
+          files: target/release/mini.exe
+          fail_on_unmatched_files: true
+          make_latest: true
