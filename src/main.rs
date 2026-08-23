@@ -10,39 +10,11 @@ use tao::platform::windows::WindowBuilderExtWindows;
 use tao::window::{Icon, Window, WindowBuilder};
 use wry::{NewWindowResponse, PageLoadEvent, Rect, WebContext, WebView, WebViewBuilder, WebViewBuilderExtWindows};
 
-// Privileged content script. Child WebView2 HWNDs swallow WM_KEYDOWN, so tao
-// handle_key never sees F5/Ctrl+R/Alt+Left/Right/Alt+Home while a webview is
-// focused (the normal case). Same pattern as SPEC.md §3 Ctrl+L.
 const CTRL_L_SCRIPT: &str = r#"
 document.addEventListener('keydown', (e) => {
-  if (e.ctrlKey && !e.shiftKey && !e.altKey && (e.key === 'l' || e.key === 'L')) {
+  if (e.ctrlKey && !e.shiftKey && !e.altKey && e.key === 'l') {
     e.preventDefault();
     window.ipc.postMessage('{"cmd":"focus-url"}');
-  } else if (e.key === 'F5') {
-    e.preventDefault();
-    location.reload();
-  } else if (e.ctrlKey && !e.altKey && (e.key === 'r' || e.key === 'R')) {
-    e.preventDefault();
-    location.reload();
-  } else if (e.altKey && !e.ctrlKey && e.key === 'ArrowLeft') {
-    e.preventDefault();
-    history.back();
-  } else if (e.altKey && !e.ctrlKey && e.key === 'ArrowRight') {
-    e.preventDefault();
-    history.forward();
-  } else if (e.altKey && !e.ctrlKey && e.key === 'Home') {
-    e.preventDefault();
-    window.ipc.postMessage('{"cmd":"home"}');
-  }
-}, true);
-"#;
-
-// Chrome HWND is also a child webview. Alt+Home uses existing chrome "home" IPC.
-const CHROME_KEY_SCRIPT: &str = r#"
-document.addEventListener('keydown', (e) => {
-  if (e.altKey && !e.ctrlKey && e.key === 'Home') {
-    e.preventDefault();
-    window.ipc.postMessage('{"cmd":"home"}');
   }
 }, true);
 "#;
@@ -150,6 +122,12 @@ impl App {
 
     /// True while content shows the null-origin start page (not an http(s) site).
     fn content_on_start_page(&self) -> bool {
+        // Appendix B.1: navigate only while we still show the start page we loaded.
+        // url()-only is also true for about:blank / data: after a remote page
+        // (T6 allows data:text/html), which would reopen a content navigate channel.
+        if !self.on_start {
+            return false;
+        }
         match self.content.url() {
             Ok(u) => !(u.starts_with("http://") || u.starts_with("https://")),
             Err(_) => true,
@@ -214,9 +192,6 @@ fn handle_msg(app: &mut App, msg: Msg, control_flow: &mut ControlFlow) {
                     "navigate" if app.content_on_start_page() => {
                         app.navigate(c.text.as_deref().unwrap_or(""))
                     }
-                    // Privileged init script posts this for Alt+Home. XSS can
-                    // also send it (forces start page; not a navigate channel).
-                    "home" => app.go_home(),
                     _ => {} // everything else from content: ignored
                 }
             }
@@ -342,7 +317,6 @@ fn main() {
             .with_html(include_str!("../ui/chrome.html"))
             .with_bounds(rc)
             .with_focused(false)
-            .with_initialization_script(CHROME_KEY_SCRIPT)
             .with_ipc_handler(move |request| {
                 let _ = send(Msg::ChromeIpc(request.body().clone()));
             })
