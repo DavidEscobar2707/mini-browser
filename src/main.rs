@@ -87,6 +87,21 @@ fn allow_http_https_only(url: String) -> bool {
         || url.starts_with("data:text/html")
 }
 
+/// Evergreen WebView2 otherwise sends a WebView2 client-hint brand. Search engines
+/// and GitHub treat that as an embedded/automation client and spam CAPTCHAs.
+fn edge_like_user_agent() -> String {
+    // pv verified on this machine at v1 (Evergreen 151). Major must match the runtime.
+    const VER: &str = "151.0.4129.101";
+    format!(
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/151.0.0.0 Safari/537.36 Edg/{VER}"
+    )
+}
+
+/// Keep wry's default feature disables; add AutomationControlled off so
+/// `navigator.webdriver` is not set. Content webview only (own User Data dir).
+const CONTENT_BROWSER_ARGS: &str =
+    "--disable-features=msWebOOUI,msPdfOOUI,msSmartScreenProtection --disable-blink-features=AutomationControlled";
+
 impl App {
     fn set_chrome_url(&self, url: &str) {
         let js = format!("window.setUrl({})", serde_json::to_string(url).unwrap());
@@ -283,6 +298,8 @@ fn main() {
             .with_initialization_script(CTRL_L_SCRIPT)
             .with_clipboard(true)
             .with_hotkeys_zoom(false)
+            .with_user_agent(edge_like_user_agent())
+            .with_additional_browser_args(CONTENT_BROWSER_ARGS)
             .with_devtools(cfg!(debug_assertions))
             .with_browser_extensions_enabled(false) // WebViewBuilderExtWindows
             .with_browser_accelerator_keys(false)
