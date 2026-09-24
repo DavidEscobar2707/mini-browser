@@ -1,0 +1,125 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Promo Admin — QA End-to-End Fixture</title>
+<style>
+  body { margin: 0; font-family: sans-serif; }
+  .promo-card { border: 1px solid #ccc; padding: 8px; margin: 8px 0; }
+  .fixed-width-block { width: 400px; background: #fdd; padding: 8px; } /* overflows only at 390px viewport */
+  @media (max-width: 480px) {
+    #export { display: none; }
+  }
+</style>
+</head>
+<body>
+  <header><h1>Promo Admin</h1></header>
+  <nav aria-label="Primary"><a href="#promos">Promotions</a></nav>
+
+  <main id="promos">
+    <h2>Promotions</h2>
+
+    <button id="filters-toggle" aria-expanded="false" aria-controls="filters-panel">Filters</button>
+    <div id="filters-panel" hidden>
+      <label>Status
+        <select id="status-filter"><option value="active">Active</option><option value="expired">Expired</option></select>
+      </label>
+      <label>Region
+        <select id="region-filter"><option value="us">US</option><option value="eu">EU</option></select>
+      </label>
+      <label><input id="featured-filter" type="checkbox"> Featured only</label>
+    </div>
+
+    <div class="tablist" role="tablist" aria-label="Promotion views">
+      <button role="tab" id="tab-active" aria-selected="true" aria-controls="panel-active">Active</button>
+      <button role="tab" id="tab-scheduled" aria-selected="false" aria-controls="panel-scheduled">Scheduled</button>
+    </div>
+    <div id="panel-active" role="tabpanel">Active promotions are listed here.</div>
+    <div id="panel-scheduled" role="tabpanel" hidden>Scheduled promotions are listed here.</div>
+
+    <details>
+      <summary>What counts as a promotion?</summary>
+      <p>Any discount code, bundle, or seasonal offer configured for the storefront.</p>
+    </details>
+
+    <label for="code">Promo code</label>
+    <input id="code" name="code" type="text">
+
+    <form method="post" action="/promotions">
+      <label>New promotion name <input type="text" name="name"></label>
+      <button type="submit">Create promotion</button>
+    </form>
+
+    <label>Sort by
+      <select id="sort"><option value="name">Name</option><option value="date">Date</option></select>
+    </label>
+    <label><input id="show-expired" type="checkbox"> Show expired</label>
+
+    <a href="https://example.com/promotions-help">Promotions help (external)</a>
+
+    <div class="promo-card">
+      <h3>Fall Sale &mdash; undefined% off</h3>
+      <p>Ends soon.</p>
+    </div>
+    <div class="promo-card">
+      <h3>Winter Bundle &mdash; 20% off</h3>
+      <p>Ends soon.</p>
+    </div>
+
+    <div class="fixed-width-block">This card is a fixed 400px wide block with no responsive sizing and no scrolling ancestor.</div>
+
+    <button id="export">Export CSV</button>
+  </main>
+
+  <footer><p>&copy; Promo Admin</p></footer>
+
+  <script>
+    // 1. Filters toggle: shows a 3-control panel (2 selects + 1 checkbox), all
+    // hidden (and so absent from snapshot().actions) until this is clicked.
+    const filtersBtn = document.getElementById('filters-toggle');
+    const filtersPanel = document.getElementById('filters-panel');
+    filtersBtn.addEventListener('click', () => {
+      filtersPanel.hidden = !filtersPanel.hidden;
+      filtersBtn.setAttribute('aria-expanded', String(!filtersPanel.hidden));
+    });
+
+    // 2. Two-tab tablist: aria-selected flips between the two tabs on click.
+    const tabActive = document.getElementById('tab-active');
+    const tabScheduled = document.getElementById('tab-scheduled');
+    const panelActive = document.getElementById('panel-active');
+    const panelScheduled = document.getElementById('panel-scheduled');
+    function selectTab(makeActive) {
+      tabActive.setAttribute('aria-selected', String(makeActive));
+      tabScheduled.setAttribute('aria-selected', String(!makeActive));
+      panelActive.hidden = !makeActive;
+      panelScheduled.hidden = makeActive;
+    }
+    tabActive.addEventListener('click', () => selectTab(true));
+    tabScheduled.addEventListener('click', () => selectTab(false));
+
+    // 4. Promo-code autosave: the real QA firewall must block this PATCH
+    // (non-GET/HEAD/OPTIONS). If it ever gets through, python's http.server
+    // has no PATCH handler and answers 501 — itself a visible signal.
+    document.getElementById('code').addEventListener('input', () => {
+      fetch('/api/autosave', { method: 'PATCH', body: '{}' }).catch(() => {});
+    });
+
+    // 8(b): a first-party fetch that both 404s (network fact) and rejects
+    // (unhandled promise rejection -> console-error fact). No .catch() on
+    // purpose.
+    fetch('/api/promotions').then((r) => {
+      if (!r.ok) throw new Error('failed to load promotions: ' + r.status);
+      return r.json();
+    });
+
+    // 8(a): one logged console.error, plus one genuinely uncaught exception
+    // (deferred so it can't be swallowed by any surrounding script scope) —
+    // the latter must land in frontend.jsonl as a real uncaught error.
+    console.error('promo widget failed to initialize telemetry');
+    setTimeout(() => {
+      throw new Error('promo widget: uncaught init failure');
+    }, 0);
+  </script>
+</body>
+</html>

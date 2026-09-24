@@ -1,0 +1,24 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>QA Overlap Fixture</title>
+<style>
+  body { margin: 0; font-family: sans-serif; padding: 20px; }
+  .stage { position: relative; height: 120px; border: 1px solid #ccc; }
+  .btn-a { position: absolute; left: 20px; top: 20px; width: 120px; height: 44px; background: #fdd; }   /* defect: heavily overlapped by btn-b */
+  .btn-b { position: absolute; left: 60px; top: 20px; width: 120px; height: 44px; background: #ddf; }
+  .clean-a { position: absolute; left: 20px; top: 80px; width: 100px; height: 36px; background: #dfd; } /* clean: no overlap */
+  .clean-b { position: absolute; left: 140px; top: 80px; width: 100px; height: 36px; background: #dfe; }
+</style>
+</head>
+<body>
+  <h1>Overlap fixture</h1>
+  <div class="stage">
+    <button class="btn-a">Save</button>
+    <button class="btn-b">Save and continue</button>
+    <button class="clean-a">Cancel</button>
+    <button class="clean-b">Help</button>
+  </div>
+</body>
+</html>

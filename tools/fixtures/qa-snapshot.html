@@ -1,0 +1,26 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>QA Snapshot Fixture</title>
+</head>
+<body>
+  <h1>Snapshot fixture</h1>
+
+  <form method="POST" action="/submit-profile">
+    <label>Email <input type="email" name="email" value=""></label>
+    <label><input type="checkbox" name="agree"> I agree to the terms</label>
+    <button type="submit">Save profile</button>
+  </form>
+
+  <a href="https://example.com/help">External help link</a>
+
+  <button disabled>Disabled button (must not appear in actions)</button>
+
+  <select name="color">
+    <option value="">Choose a color&hellip;</option>
+    <option value="red">Red</option>
+    <option value="blue">Blue</option>
+  </select>
+</body>
+</html>

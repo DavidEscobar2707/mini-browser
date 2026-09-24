@@ -1,0 +1,25 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>QA Overflow Fixture</title>
+<style>
+  body { margin: 0; font-family: sans-serif; padding: 12px; }
+  .narrow { width: 300px; border: 1px solid #ccc; padding: 8px; margin-bottom: 16px; }
+  .too-wide { width: 900px; background: #fdd; }               /* defect: overflows the viewport, no scroller ancestor */
+  .scroller { width: 300px; overflow-x: auto; white-space: nowrap; border: 1px solid #9c9; margin-bottom: 16px; }
+  .scroller .wide-child { display: inline-block; width: 900px; background: #cfc; } /* clean: contained by a real horizontal scroller */
+  .normal { width: 200px; background: #eef; padding: 8px; }    /* clean: fits comfortably */
+</style>
+</head>
+<body>
+  <h1>Overflow fixture</h1>
+  <div class="narrow">
+    <div class="too-wide">This block is 900px wide inside a 300px container: it overflows the viewport (defect).</div>
+  </div>
+  <div class="scroller">
+    <div class="wide-child">This 900px block lives inside a legitimate horizontal scroller: must NOT be flagged.</div>
+  </div>
+  <div class="normal">Normal block, fits comfortably within the viewport (clean sibling).</div>
+</body>
+</html>

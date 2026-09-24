@@ -1,0 +1,29 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>react-remount</title>
+<div id="root"></div>
+<button id="break">break</button>
+<button id="ok">ok</button>
+<script src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
+<script src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
+<script>
+function Child(props) {
+  return React.createElement('div', { id: 'child' }, String(props.label));
+}
+function App() {
+  const [k, setK] = React.useState(0);
+  const [label, setLabel] = React.useState(0);
+  React.useEffect(() => {
+    document.getElementById('break').onclick = async () => {
+      await fetch('data:text/plain,tick');
+      setK((k) => k + 1);
+    };
+    document.getElementById('ok').onclick = async () => {
+      await fetch('data:text/plain,tick');
+      setLabel((x) => x + 1);
+    };
+  }, []);
+  return React.createElement(Child, { key: k, label: label });
+}
+ReactDOM.createRoot(document.getElementById('root')).render(React.createElement(App));
+</script>

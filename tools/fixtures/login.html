@@ -1,0 +1,15 @@
+<!doctype html>
+<html><head><meta charset="utf-8"><title>Fixture login</title></head>
+<body>
+<form id="search" action="/search" method="get" onsubmit="event.preventDefault(); document.getElementById('out').textContent='searched: '+this.q.value">
+  <input name="q" type="search" placeholder="Search docs">
+  <button type="submit">Search</button>
+</form>
+<hr>
+<form id="login" onsubmit="event.preventDefault(); document.body.innerHTML='<h1>Welcome, '+this.email.value+'</h1><p>You are signed in.</p>'">
+  <label>Email <input name="email" type="email"></label>
+  <label>Password <input name="password" type="password"></label>
+  <button type="submit">Sign in</button>
+</form>
+<p id="out"></p>
+</body></html>

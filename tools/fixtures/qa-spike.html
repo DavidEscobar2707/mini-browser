@@ -1,0 +1,42 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Mini QA Spike Fixture</title>
+<style>
+  body { font-family: system-ui, sans-serif; margin: 40px; background: #111; color: #eee; }
+  button { font-size: 18px; padding: 10px 18px; margin-right: 12px; }
+  span { font-weight: bold; color: #7fd0ff; }
+</style>
+</head>
+<body>
+<h1>Mini QA Spike Fixture</h1>
+
+<p>Count: <span id="n">0</span></p>
+<button id="inc">Increment</button>
+
+<p>Blocked request result: <span id="err">(not tried yet)</span></p>
+<button id="post-blocked">POST /blocked</button>
+
+<script>
+  (function () {
+    let n = 0;
+    document.getElementById('inc').addEventListener('click', function () {
+      n += 1;
+      document.getElementById('n').textContent = String(n);
+    });
+
+    document.getElementById('post-blocked').addEventListener('click', function () {
+      fetch('/blocked', { method: 'POST', body: 'x' })
+        .then(function (r) {
+          document.getElementById('err').textContent = 'status:' + r.status;
+        })
+        .catch(function (e) {
+          document.getElementById('err').textContent = 'error:' + e.message;
+        });
+    });
+  })();
+</script>
+</body>
+</html>

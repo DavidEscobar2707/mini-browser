@@ -1,0 +1,13 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>flicker</title>
+<div id="box"></div>
+<button id="flick">flick</button>
+<script>
+document.getElementById('flick').onclick = () => {
+  const d = document.createElement('div');
+  d.id = 'r';
+  document.getElementById('box').appendChild(d);
+  setTimeout(() => d.remove(), 4);
+};
+</script>

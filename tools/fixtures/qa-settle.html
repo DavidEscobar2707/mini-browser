@@ -1,0 +1,21 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>QA Settle Fixture</title>
+</head>
+<body>
+  <h1>Settle fixture</h1>
+  <div id="ticker">0</div>
+  <script>
+    // Mutates every 150ms for six ticks (~900ms), then stops for good.
+    let n = 0;
+    const el = document.getElementById('ticker');
+    const timer = setInterval(() => {
+      n += 1;
+      el.textContent = String(n);
+      if (n >= 6) clearInterval(timer);
+    }, 150);
+  </script>
+</body>
+</html>

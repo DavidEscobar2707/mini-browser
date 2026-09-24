@@ -19,6 +19,23 @@ pub fn shell_dir() -> PathBuf {
         .join("Shell")
 }
 
+pub fn qa_profile_dir() -> PathBuf {
+    dirs::data_local_dir()
+        .expect("%LOCALAPPDATA% is unavailable")
+        .join("Mini")
+        .join("QA")
+        .join("profile")
+}
+
+/// Wipes and recreates the QA profile dir so every `--qa`/`--qa-spike` run
+/// starts from a clean cookie/cache slate. Best-effort: a stale profile is
+/// not fatal, so I/O failures are swallowed rather than panicking the run.
+pub fn reset_qa_profile() {
+    let dir = qa_profile_dir();
+    let _ = std::fs::remove_dir_all(&dir);
+    let _ = std::fs::create_dir_all(&dir);
+}
+
 pub fn ensure_dirs() {
     std::fs::create_dir_all(profile_dir()).expect("create %LOCALAPPDATA%\\Mini\\User Data");
     std::fs::create_dir_all(shell_dir()).expect("create %LOCALAPPDATA%\\Mini\\Shell");
