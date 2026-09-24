@@ -365,6 +365,211 @@ impl DebugRecorder {
     }
 }
 
+fn current_path() -> PathBuf {
+    debug_root().join("current.json")
+}
+
+/// Parsed `current.json`, or `None` when the file is missing or invalid.
+pub fn read_status() -> Option<serde_json::Value> {
+    let text = std::fs::read_to_string(current_path()).ok()?;
+    serde_json::from_str(&text).ok()
+}
+
+/// The dead-session form of a status record: `ready`/`alive` false and no
+/// `cdp`. Only when the record belongs to `pid`; a newer session's record is
+/// returned unchanged so an old process can never clobber it.
+fn tombstone(mut status: serde_json::Value, pid: u64) -> serde_json::Value {
+    if status.get("pid").and_then(|v| v.as_u64()) != Some(pid) {
+        return status;
+    }
+    if let Some(obj) = status.as_object_mut() {
+        obj.insert("ready".into(), serde_json::Value::Bool(false));
+        obj.insert("alive".into(), serde_json::Value::Bool(false));
+        obj.insert("cdp".into(), serde_json::Value::Null);
+    }
+    status
+}
+
+/// Rewrites `current.json` as dead when it still names `pid`. Never panics.
+fn tombstone_pid(pid: u32) {
+    if let Some(status) = read_status() {
+        let dead = tombstone(status.clone(), u64::from(pid));
+        if dead != status {
+            let _ = std::fs::write(current_path(), dead.to_string());
+        }
+    }
+}
+
+impl Drop for DebugRecorder {
+    fn drop(&mut self) {
+        tombstone_pid(std::process::id());
+    }
+}
+
+/// Tombstones this process's record on a normal exit. The interactive loop
+/// never returns (`event_loop.run` exits the process), so `Drop` alone does
+/// not run there; `main` calls this on `ControlFlow::Exit`.
+pub fn tombstone_self() {
+    tombstone_pid(std::process::id());
+}
+
+/// Why a recorded debug browser is not usable, or `None` when it is.
+/// Pure: the Windows checks are passed in so tests need no live process.
+fn status_problem(
+    status: Option<&serde_json::Value>,
+    alive: impl Fn(u32) -> bool,
+    image_ok: impl Fn(u32) -> bool,
+    port_open: impl Fn(&str) -> bool,
+) -> Option<&'static str> {
+    let Some(s) = status else { return Some("missing file") };
+    if !s.get("ready").and_then(|v| v.as_bool()).unwrap_or(false) {
+        return Some("not ready");
+    }
+    if s.get("alive").and_then(|v| v.as_bool()) == Some(false) {
+        return Some("not ready");
+    }
+    let Some(pid) = s.get("pid").and_then(|v| v.as_u64()).and_then(|p| u32::try_from(p).ok()) else {
+        return Some("missing file");
+    };
+    if !alive(pid) {
+        return Some("pid dead");
+    }
+    if !image_ok(pid) {
+        return Some("pid is not mini.exe");
+    }
+    let cdp = s.get("cdp").and_then(|v| v.as_str()).unwrap_or("");
+    if !port_open(cdp) {
+        return Some("port closed");
+    }
+    None
+}
+
+/// `127.0.0.1:9222` from `http://127.0.0.1:9222`.
+fn cdp_socket_addr(cdp: &str) -> Option<std::net::SocketAddr> {
+    let authority = cdp.strip_prefix("http://")?.trim_end_matches('/');
+    authority.parse().ok()
+}
+
+fn port_accepts(cdp: &str) -> bool {
+    match cdp_socket_addr(cdp) {
+        Some(addr) => {
+            std::net::TcpStream::connect_timeout(&addr, std::time::Duration::from_secs(1)).is_ok()
+        }
+        None => false,
+    }
+}
+
+const STILL_ACTIVE: u32 = 259;
+
+pub fn process_alive(pid: u32) -> bool {
+    use windows::Win32::Foundation::CloseHandle;
+    use windows::Win32::System::Threading::{GetExitCodeProcess, OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION};
+    unsafe {
+        let Ok(handle) = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, false, pid) else {
+            return false;
+        };
+        let mut code = 0u32;
+        let ok = GetExitCodeProcess(handle, &mut code).is_ok();
+        let _ = CloseHandle(handle);
+        ok && code == STILL_ACTIVE
+    }
+}
+
+pub fn process_image_is_mini(pid: u32) -> bool {
+    use windows::core::PWSTR;
+    use windows::Win32::Foundation::CloseHandle;
+    use windows::Win32::System::Threading::{
+        OpenProcess, QueryFullProcessImageNameW, PROCESS_NAME_WIN32, PROCESS_QUERY_LIMITED_INFORMATION,
+    };
+    unsafe {
+        let Ok(handle) = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, false, pid) else {
+            return false;
+        };
+        let mut buf = [0u16; 1024];
+        let mut len = buf.len() as u32;
+        let ok = QueryFullProcessImageNameW(handle, PROCESS_NAME_WIN32, PWSTR(buf.as_mut_ptr()), &mut len).is_ok();
+        let _ = CloseHandle(handle);
+        if !ok {
+            return false;
+        }
+        let path = String::from_utf16_lossy(&buf[..len as usize]);
+        path.rsplit(['\\', '/']).next().is_some_and(|name| name.eq_ignore_ascii_case("mini.exe"))
+    }
+}
+
+/// `mini --debug-status`: 0 when the recorded debug browser is up and its CDP
+/// port accepts connections; otherwise one stderr line naming the failed check, 2.
+pub fn status_code() -> i32 {
+    let status = read_status();
+    match status_problem(status.as_ref(), process_alive, process_image_is_mini, port_accepts) {
+        None => {
+            if let Some(s) = status {
+                println!("{s}");
+            }
+            0
+        }
+        Some(problem) => {
+            eprintln!("mini: debug browser is not usable: {problem}");
+            2
+        }
+    }
+}
+
+/// Same checks as [`status_code`], without printing. For callers that
+/// report their own error (`--move`, `--observe`).
+pub fn status_code_quiet() -> i32 {
+    let status = read_status();
+    match status_problem(status.as_ref(), process_alive, process_image_is_mini, port_accepts) {
+        None => 0,
+        Some(_) => 2,
+    }
+}
+
+/// The CDP port the live session published (it may differ from this
+/// process's `MINI_DEBUG_PORT`).
+pub fn recorded_port() -> Option<u16> {
+    let status = read_status()?;
+    cdp_socket_addr(status.get("cdp")?.as_str()?).map(|a| a.port())
+}
+
+/// `mini --debug-stop`: terminates the recorded debug browser (only when the
+/// pid is still a `mini.exe`) and tombstones `current.json`.
+pub fn stop_running() -> i32 {
+    use windows::Win32::Foundation::CloseHandle;
+    use windows::Win32::System::Threading::{OpenProcess, TerminateProcess, PROCESS_TERMINATE};
+    let Some(pid) = read_status()
+        .and_then(|s| s.get("pid").and_then(|v| v.as_u64()))
+        .and_then(|p| u32::try_from(p).ok())
+    else {
+        eprintln!("mini: no debug browser recorded");
+        return 0;
+    };
+    if !process_alive(pid) {
+        tombstone_pid(pid);
+        return 0;
+    }
+    if !process_image_is_mini(pid) {
+        eprintln!("mini: pid {pid} is not mini.exe; not killing it");
+        return 2;
+    }
+    let killed = unsafe {
+        match OpenProcess(PROCESS_TERMINATE, false, pid) {
+            Ok(handle) => {
+                let ok = TerminateProcess(handle, 0).is_ok();
+                let _ = CloseHandle(handle);
+                ok
+            }
+            Err(_) => false,
+        }
+    };
+    if !killed {
+        eprintln!("mini: could not terminate pid {pid}");
+        return 2;
+    }
+    tombstone_pid(pid);
+    0
+}
+
 #[cfg(test)]
 mod tests {
     #[test]
@@ -415,5 +620,44 @@ mod tests {
         assert_eq!(ready["ready"], true);
         assert_eq!(not_ready["pid"], ready["pid"]);
         assert_eq!(not_ready["cdp"], ready["cdp"]);
+    }
+    fn ready_status() -> serde_json::Value {
+        super::status_json("http://127.0.0.1:9222", 4242, 0, Some("C:\\s"), None, None, None, true)
+    }
+
+    #[test]
+    fn tombstone_clears_cdp_and_keeps_session_dir() {
+        let dead = super::tombstone(ready_status(), 4242);
+        assert_eq!(dead["ready"], false);
+        assert_eq!(dead["alive"], false);
+        assert!(dead["cdp"].is_null());
+        assert_eq!(dead["session_dir"], ready_status()["session_dir"]);
+    }
+
+    #[test]
+    fn tombstone_leaves_another_sessions_record_alone() {
+        assert_eq!(super::tombstone(ready_status(), 1), ready_status());
+    }
+
+    #[test]
+    fn status_problem_is_none_only_when_every_check_passes() {
+        let s = ready_status();
+        let yes = |_: u32| true;
+        let no = |_: u32| false;
+        let open = |_: &str| true;
+        let closed = |_: &str| false;
+        assert_eq!(super::status_problem(Some(&s), yes, yes, open), None);
+        assert_eq!(super::status_problem(None, yes, yes, open), Some("missing file"));
+        assert_eq!(super::status_problem(Some(&s), no, yes, open), Some("pid dead"));
+        assert_eq!(super::status_problem(Some(&s), yes, no, open), Some("pid is not mini.exe"));
+        assert_eq!(super::status_problem(Some(&s), yes, yes, closed), Some("port closed"));
+        let dead = super::tombstone(s.clone(), 4242);
+        assert_eq!(super::status_problem(Some(&dead), yes, yes, open), Some("not ready"));
+    }
+
+    #[test]
+    fn cdp_socket_addr_parses_the_published_url() {
+        assert_eq!(super::cdp_socket_addr("http://127.0.0.1:9222").map(|a| a.port()), Some(9222));
+        assert!(super::cdp_socket_addr("").is_none());
     }
 }
