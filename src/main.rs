@@ -5,6 +5,9 @@ mod debug;
 mod profile;
 mod analyze;
 mod qa;
+mod cdp;
+mod move_cmd;
+mod text_helper;
 
 use crate::qa::Browser;
 
@@ -228,6 +231,32 @@ struct IpcCmd {
     label: Option<String>,
     #[serde(default)]
     incident: Option<String>,
+    /// `debug-batch`: raw recorder lines, each a `{"cmd":"debug",...}` object.
+    #[serde(default)]
+    lines: Vec<String>,
+}
+
+/// Files one recorder line (or every line of a `debug-batch`) into its stream.
+fn route_debug(rec: &mut debug::DebugRecorder, c: &IpcCmd, body: &str) {
+    if c.cmd == "debug-batch" {
+        for line in &c.lines {
+            if let Ok(inner) = serde_json::from_str::<IpcCmd>(line) {
+                if inner.cmd == "debug" {
+                    route_debug(rec, &inner, line);
+                }
+            }
+        }
+        return;
+    }
+    match c.kind.as_deref() {
+        Some("dom") => rec.dom_line(body),
+        Some("net") => rec.net_line(body),
+        Some("react") => rec.react_line(body),
+        Some("frame") => rec.frames_line(body),
+        Some("mark") => rec.marks_line(body),
+        Some("run") => rec.start_run(c.label.as_deref().unwrap_or("run"), c.incident.as_deref().unwrap_or("")),
+        _ => rec.frontend_line(body),
+    }
 }
 
 fn handle_msg(app: &mut App, msg: Msg, control_flow: &mut ControlFlow) {
@@ -243,6 +272,15 @@ fn handle_msg(app: &mut App, msg: Msg, control_flow: &mut ControlFlow) {
                     "maximize" => app.window.set_maximized(!app.window.is_maximized()),
                     "close" => *control_flow = ControlFlow::Exit,
                     "home" => app.go_home(),
+                    "back" => {
+                        let _ = app.content.go_back();
+                    }
+                    "forward" => {
+                        let _ = app.content.go_forward();
+                    }
+                    "reload" => {
+                        let _ = app.content.reload();
+                    }
                     _ => {} // unknown cmd -> ignore (SPEC.md §7)
                 }
             }
@@ -257,20 +295,9 @@ fn handle_msg(app: &mut App, msg: Msg, control_flow: &mut ControlFlow) {
                     "navigate" if app.content_on_start_page() => {
                         app.navigate(c.text.as_deref().unwrap_or(""))
                     }
-                    "debug" => {
+                    "debug" | "debug-batch" => {
                         if let Some(rec) = app.debug.as_mut() {
-                            match c.kind.as_deref() {
-                                Some("dom") => rec.dom_line(&body),
-                                Some("net") => rec.net_line(&body),
-                                Some("react") => rec.react_line(&body),
-                                Some("frame") => rec.frames_line(&body),
-                                Some("mark") => rec.marks_line(&body),
-                                Some("run") => rec.start_run(
-                                    c.label.as_deref().unwrap_or("run"),
-                                    c.incident.as_deref().unwrap_or(""),
-                                ),
-                                _ => rec.frontend_line(&body),
-                            }
+                            route_debug(rec, &c, &body);
                         }
                     }
                     _ => {} // everything else from content: ignored
@@ -293,9 +320,11 @@ fn handle_msg(app: &mut App, msg: Msg, control_flow: &mut ControlFlow) {
                 app.set_chrome_title(&host);
             }
         }
-        Msg::PageLoad(_, url) => {
+        Msg::PageLoad(event, url) => {
+            let loading = matches!(event, PageLoadEvent::Started);
+            let _ = app.chrome.evaluate_script(&format!("window.setLoading({loading})"));
             if let Some(rec) = app.debug.as_mut() {
-                rec.backend("page-load", &url);
+                rec.backend(if loading { "page-load-start" } else { "page-load" }, &url);
             }
             // Start page: SPEC.md §4 URL field empty. WebView2 reports about:blank / data:text/html.
             if app.on_start {
@@ -326,6 +355,21 @@ fn main() {
     }
     if let Some(i) = args.iter().position(|a| a == "--qa") {
         run_qa(&args, i);
+    }
+    if args.iter().any(|a| a == "--debug-status") {
+        std::process::exit(debug::status_code());
+    }
+    if args.iter().any(|a| a == "--debug-stop") {
+        std::process::exit(debug::stop_running());
+    }
+    if args.iter().any(|a| a == "--observe") {
+        std::process::exit(move_cmd::observe());
+    }
+    if args.iter().any(|a| a == "--read") {
+        std::process::exit(move_cmd::read());
+    }
+    if let Some(i) = args.iter().position(|a| a == "--move") {
+        std::process::exit(move_cmd::run(&args, i));
     }
 
     // An explicit `--debug` (or `MINI_DEBUG`) launch re-execs itself detached
@@ -498,6 +542,10 @@ fn main() {
         debug: recorder,
     };
 
+    if debug_on {
+        let _ = app.chrome.evaluate_script(&format!("window.setAgent({})", debug::port()));
+    }
+
     // Deferred until App exists: navigate() also updates chrome URL + FAB.
     if let Some(input) = &start_input {
         app.navigate(input);
@@ -536,6 +584,8 @@ fn main() {
             Event::WindowEvent { event: WindowEvent::CloseRequested, .. } => {
                 *control_flow = ControlFlow::Exit;
             }
+            // tao exits the process after this event, so `Drop` never runs.
+            Event::LoopDestroyed if debug_on => debug::tombstone_self(),
             _ => {}
         }
     });
@@ -697,19 +747,8 @@ fn run_qa_event_loop(shell: QaShell, state: qa::bridge::BridgeState, abort: Opti
                     if let Ok(c) = serde_json::from_str::<IpcCmd>(&body) {
                         // Content-IPC allowlist unchanged: only `debug` (recorder)
                         // messages are meaningful here (see module doc comment above).
-                        if c.cmd == "debug" {
-                            match c.kind.as_deref() {
-                                Some("dom") => rec.dom_line(&body),
-                                Some("net") => rec.net_line(&body),
-                                Some("react") => rec.react_line(&body),
-                                Some("frame") => rec.frames_line(&body),
-                                Some("mark") => rec.marks_line(&body),
-                                Some("run") => rec.start_run(
-                                    c.label.as_deref().unwrap_or("run"),
-                                    c.incident.as_deref().unwrap_or(""),
-                                ),
-                                _ => rec.frontend_line(&body),
-                            }
+                        if c.cmd == "debug" || c.cmd == "debug-batch" {
+                            route_debug(rec, &c, &body);
                         }
                     }
                 }
@@ -861,17 +900,15 @@ fn run_qa(args: &[String], qa_index: usize) -> ! {
         std::process::exit(2);
     }
 
-    let api_key = std::env::var("TYPESAFE_API_KEY").ok().filter(|k| !k.is_empty());
+    let api_key = qa::jev::api_key();
     if api_key.is_none() {
         eprintln!(
-            "mini --qa: TYPESAFE_API_KEY is not set. QA runs judge findings with Jev (api.typesafe.ai) \u{2014} export TYPESAFE_API_KEY and retry."
+            "mini --qa: no Jev API key found. QA runs judge findings with Jev (api.typesafe.ai) \u{2014} {}.",
+            qa::jev::key_help()
         );
         std::process::exit(2);
     }
-    let model = std::env::var("TYPESAFE_MODEL")
-        .ok()
-        .filter(|m| !m.is_empty())
-        .unwrap_or_else(|| qa::DEFAULT_MODEL.to_string());
+    let model = qa::jev::model();
     let out_dir = cli.out.clone().unwrap_or_else(|| qa_out_dir(&host));
 
     let cfg = qa::QaConfig {

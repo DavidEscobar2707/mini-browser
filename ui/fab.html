@@ -4,18 +4,21 @@
 <meta charset="utf-8">
 <style>
   html, body { margin:0; height:100%; background:transparent; overflow:hidden; }
-  #fab { width:48px; height:48px; border-radius:14px; background:#141414; cursor:default;
-         display:flex; align-items:center; justify-content:center; }
+  #fab { width:48px; height:48px; border:none; padding:0; border-radius:14px; background:#141414; cursor:default;
+         display:flex; align-items:center; justify-content:center; transition:transform .12s, background .12s; }
+  #fab:hover { background:#262626; }
+  #fab:active { transform:scale(.94); }
+  #fab:focus-visible { outline:2px solid #6e9bff; outline-offset:-3px; }
   svg { stroke:#ffffff; fill:none; }
 </style>
 </head>
 <body>
-<div id="fab">
+<button id="fab" title="Start page (Alt+Home)" aria-label="Start page">
   <svg width="22" height="22" viewBox="0 0 24 24" stroke-width="2"
        stroke-linecap="round" stroke-linejoin="round">
     <path d="M3 11l9-8 9 8"/><path d="M5 10v10h14V10"/>
   </svg>
-</div>
+</button>
 <script>
   document.getElementById('fab').addEventListener('click',
     () => window.ipc.postMessage('{"cmd":"home"}'));
