@@ -9,8 +9,8 @@ Product intent these plans serve: a coding agent working on a local app keeps on
 | Plan | Title | Priority | Effort | Depends on | Status |
 |------|-------|----------|--------|------------|--------|
 | 001 | Detach the debug browser and publish current.json only after CDP is listening | P1 | M | — | DONE |
-| 002 | Make current.json false when the process is dead, and add status/stop | P1 | S | 001 | TODO |
-| 003 | Let Jev take goal steps in the live loopback debug window | P1 | L | 001, 002 | TODO |
+| 002 | Make current.json false when the process is dead, and add status/stop | P1 | S | 001 | DONE |
+| 003 | Let Jev take goal steps in the live loopback debug window | P1 | L | 001, 002 | DONE (plus `--observe`, `--url`, `--allow-remote`, password fields in `--move` only) |
 
 Status values: TODO | IN PROGRESS | DONE | BLOCKED (with one-line reason) | REJECTED (with one-line rationale — finding fixed independently or approach abandoned)
 

@@ -1,3 +1,8 @@
 /target
 .superpowers/
+tools/node_modules/
+.debug*/
 
+tools/spec-audit-*.js
+_plan_smoke.ps1
+.grok/
