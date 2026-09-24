@@ -57,6 +57,13 @@ Loopback hosts only unless you pass `--allow-remote`. Needs a Jev key (see
 `1` = stopped without DONE, `2` = could not run. `DONE` is the model's claim —
 verify the outcome yourself.
 
+## Site lessons
+
+`--move` sends Jev the lessons for the current site: the file `<host>.md` (no
+`www.`) in `%LOCALAPPDATA%\Mini\hints`, or in the folder you pass with
+`--hints DIR`. Keep one short, imperative bullet per quirk ("Press Enter after
+typing in the search box"). Front matter and headings are skipped.
+
 ## Jev API key
 
 `--move` and `--qa` call Jev (api.typesafe.ai). Mini takes the key from the

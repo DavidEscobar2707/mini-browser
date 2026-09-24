@@ -157,6 +157,14 @@ impl Cdp {
         Ok(())
     }
 
+    /// Enter on the focused element (submits a search box with no button).
+    pub fn press_enter(&mut self) -> Result<(), String> {
+        let down = json!({ "type": "keyDown", "key": "Enter", "code": "Enter", "windowsVirtualKeyCode": 13, "text": "\r" });
+        self.call("Input.dispatchKeyEvent", down)?;
+        self.call("Input.dispatchKeyEvent", json!({ "type": "keyUp", "key": "Enter", "code": "Enter", "windowsVirtualKeyCode": 13 }))?;
+        Ok(())
+    }
+
     pub fn key_text(&mut self, text: &str) -> Result<(), String> {
         if self.call("Input.insertText", json!({ "text": text })).is_ok() {
             return Ok(());

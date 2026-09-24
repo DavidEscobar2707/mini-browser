@@ -39,6 +39,8 @@ pub struct MoveArgs {
     pub allow_remote: bool,
     /// Type only operator-supplied values, even when a text helper is configured.
     pub no_text_helper: bool,
+    /// Folder of per-site lesson files (`<host>.md`), sent to Jev as site_notes.
+    pub hints_dir: Option<std::path::PathBuf>,
 }
 
 /// Parses `--move --goal <text> [--steps N] [--value name=value]... [--url U]
@@ -69,6 +71,10 @@ pub fn parse_args(args: &[String], stdin_json: Option<&str>) -> Result<MoveArgs,
             }
             "--allow-remote" => out.allow_remote = true,
             "--no-text-helper" => out.no_text_helper = true,
+            "--hints" => {
+                out.hints_dir = Some(next.ok_or("--hints needs a folder")?.into());
+                i += 1;
+            }
             _ => {}
         }
         i += 1;
@@ -387,6 +393,16 @@ fn perform(cdp: &mut Cdp, d: &Decision, typed: Option<&str>) -> Result<Option<St
             cdp.wheel(wh[0] / 2.0, wh[1] * 0.6, delta)?;
             Ok(None)
         }
+        "PRESS_ENTER" => {
+            let focused = cdp.eval(
+                "(() => { const e = document.activeElement; return !!e && (e.isContentEditable || /^(INPUT|TEXTAREA)$/.test(e.tagName)); })()",
+            )?;
+            if focused != "true" {
+                return Ok(Some("not pressed: no text field has focus".into()));
+            }
+            cdp.press_enter()?;
+            Ok(None)
+        }
         "WAIT" => {
             std::thread::sleep(Duration::from_millis(100));
             Ok(None)
@@ -428,6 +444,64 @@ fn resolve_text(
     match helper.write(&context) {
         Ok(text) => Typed::Written { text },
         Err(e) => Typed::Refused(e),
+    }
+}
+
+/// Lessons learned on a site, kept as `<host>.md` (without `www.`) in the
+/// hints folder (`--hints DIR`, default `%LOCALAPPDATA%\Mini\hints`). Sent to
+/// Jev as `site_notes` so a known quirk is not rediscovered on every run.
+pub fn site_notes(dir: Option<&std::path::Path>, url: &str) -> Option<String> {
+    let default = dirs::data_local_dir().map(|d| d.join("Mini").join("hints"));
+    let dir = dir.map(|d| d.to_path_buf()).or(default)?;
+    let host = firewall::host_only(url);
+    let host = host.trim_start_matches("www.");
+    if host.is_empty() || host.contains("..") || host.contains(['/', '\\', ':']) {
+        return None;
+    }
+    let text = std::fs::read_to_string(dir.join(format!("{host}.md"))).ok()?;
+    Some(note_body(&text)).filter(|b| !b.is_empty()).map(|b| b.chars().take(SITE_NOTES).collect())
+}
+
+/// A note's lessons: drops YAML front matter and headings (they are for the
+/// human reading the vault).
+fn note_body(text: &str) -> String {
+    let mut lines = text.lines().peekable();
+    if lines.peek().map(|l| l.trim()) == Some("---") {
+        lines.next();
+        for l in lines.by_ref() {
+            if l.trim() == "---" {
+                break;
+            }
+        }
+    }
+    lines.filter(|l| !l.trim_start().starts_with('#')).collect::<Vec<_>>().join("\n").trim().to_string()
+}
+
+const SITE_NOTES: usize = 1500;
+
+/// Offers PRESS_ENTER right after a TYPE_TEXT on the same page: many search
+/// boxes (GitHub, Mercado Libre) have no clickable submit.
+fn offer_enter(question: &mut Value, history: &[StepRecord], steps: &[MoveStep], url: &str) {
+    let last_typed_here = steps.last().is_some_and(|s| s.operation == "TYPE_TEXT" && s.note.is_none() && s.url == url);
+    let _ = history;
+    if !last_typed_here {
+        return;
+    }
+    if let Some(c) = question["questions"]["operation"]["criteria"].as_object_mut() {
+        c.insert(
+            "PRESS_ENTER".into(),
+            json!("Press Enter in the field just typed into, to submit it. Use it after typing a search or query."),
+        );
+    }
+}
+
+fn add_site_notes(question: &mut Value, notes: &str) {
+    if let Some(qs) = question["questions"].as_object_mut() {
+        for (name, q) in qs.iter_mut() {
+            if name != "goal_met" {
+                q["instructions"]["site_notes"] = json!(notes);
+            }
+        }
     }
 }
 
@@ -568,6 +642,10 @@ fn run_loop(cdp: &mut Cdp, judge: &dyn Judge, helper: Option<&TextHelper>, a: &M
         question["state"]["page"]["rest_of_page"] = json!(rest_of_page(&before.text, &full_text(cdp), REST_OF_PAGE));
         question["state"]["tried_without_effect"] = json!(guard.dead_labels(&before.url));
         add_goal_check(&mut question, &a.goal);
+        offer_enter(&mut question, &history, &steps, &before.url);
+        if let Some(notes) = site_notes(a.hints_dir.as_deref(), &before.url) {
+            add_site_notes(&mut question, &notes);
+        }
         last_page = before.clone();
         let decision = match decide(judge, &question, &candidates) {
             Ok(d) => d,
@@ -908,6 +986,17 @@ mod tests {
     }
 
     #[test]
+    fn site_notes_come_from_the_host_file_without_front_matter() {
+        let dir = std::env::temp_dir().join(format!("mini-hints-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("github.com.md"), "---\ntype: reference\n---\n# GitHub\n- Press Enter after typing in the search box.\n").unwrap();
+        let notes = site_notes(Some(&dir), "https://www.github.com/search").unwrap();
+        assert_eq!(notes, "- Press Enter after typing in the search box.");
+        assert!(site_notes(Some(&dir), "https://example.com/").is_none());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
     fn loop_guard_retires_controls_that_do_nothing_or_repeat() {
         let el = |label: &str| ObservedElement { kind: "click".into(), label: label.into(), ..Default::default() };
         let mut g = LoopGuard::default();
@@ -1023,7 +1112,7 @@ mod tests {
         let mut values = BTreeMap::new();
         values.insert("email".to_string(), "dev@example.test".to_string());
         values.insert("password".to_string(), "s3cr3t".to_string());
-        let a = MoveArgs { goal: "sign in".into(), steps: 8, values, url: None, allow_remote: false, no_text_helper: true };
+        let a = MoveArgs { goal: "sign in".into(), steps: 8, values, url: None, allow_remote: false, no_text_helper: true, hints_dir: None };
         let report = run_loop(&mut cdp, &judge, None, &a);
         let text = serde_json::to_string(&report).unwrap();
         eprintln!("{text}");

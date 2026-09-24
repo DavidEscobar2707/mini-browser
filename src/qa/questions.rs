@@ -507,7 +507,10 @@ requirements are satisfied; if asked to open a result, a matching link is not en
 no supported operation can make progress. page.rest_of_page is page text outside the viewport; it \
 counts as visible evidence for DONE (the operator can scroll to it). tried_without_effect lists controls \
 already tried on this page that changed nothing: they are not offered again; choose a different way \
-forward, such as another control, SCROLL_DOWN, or DONE when the evidence is already on the page.";
+forward, such as another control, SCROLL_DOWN, or DONE when the evidence is already on the page. \
+After typing a search, submit it: PRESS_ENTER when offered, or CLICK the matching search button; do \
+not open help or documentation links. site_notes, when present, are lessons from earlier runs on this \
+site: follow them.";
 
 const MOVE_TARGET: &str = "Choose the best observed target if the next operation is the one named in \
 this question. Use the operator's entire goal, form_id, field values, nearby text, and \
