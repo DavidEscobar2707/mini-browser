@@ -117,6 +117,16 @@
           el.focus();
           return { ok: true, effect: 'focused ' + shortTarget(el) };
         }
+        // Focus by the snapshot's stable *node* id, for a field no current
+        // snapshot action points at any more: the field a TYPE_TEXT wrote
+        // into, whose focus an autocomplete popup stole before the Enter that
+        // submits the query. ok:false once the node left the document.
+        case 'focus_node': {
+          const el = dom && dom.nodeFor(target);
+          if (!el || !el.isConnected) return { ok: false, error: 'node ' + target + ' is gone' };
+          el.focus();
+          return { ok: true, effect: 'focused ' + shortTarget(el) };
+        }
         case 'select': {
           const action = QA.__lastActions && QA.__lastActions[target];
           if (!action || action.kind !== 'select') return { ok: false, error: 'unknown target: ' + target };

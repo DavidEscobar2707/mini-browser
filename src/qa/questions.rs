@@ -509,7 +509,9 @@ counts as visible evidence for DONE (the operator can scroll to it). tried_witho
 already tried on this page that changed nothing: they are not offered again; choose a different way \
 forward, such as another control, SCROLL_DOWN, or DONE when the evidence is already on the page. \
 After typing a search, submit it: PRESS_ENTER when offered, or CLICK the matching search button; do \
-not open help or documentation links. site_notes, when present, are lessons from earlier runs on this \
+not open help or documentation links. A control with search_like true that is a textbox you cannot \
+type into opens the real search field: CLICK it first, then TYPE_TEXT into the field that appears. \
+site_notes, when present, are lessons from earlier runs on this \
 site: follow them. past_runs, when present, lists actions taken on this same page in earlier runs: \
 n = times tried, mean_return = discounted reward (above 0 helped reach the goal; below 0 wasted steps \
 or led to a wrong result). Prefer an offered action with a high mean_return. Avoid actions with a \
@@ -597,6 +599,11 @@ pub fn move_question(
                 if let Some(v) = v {
                     entry.insert(key.into(), json!(v));
                 }
+            }
+            // A search box that is only a trigger (Éxito, Ktronix) looks like a
+            // textbox the judge can fill; the flag says what it really is.
+            if crate::affordance::is_search_like(el) {
+                entry.insert("search_like".into(), json!(true));
             }
             entry.insert("operations".into(), json!([]));
             elements.push(entry);
@@ -968,5 +975,20 @@ mod tests {
         let q = move_question("sign in", &Observation::default(), &[field], &[], &[], false);
         assert!(q["questions"]["operation"]["criteria"].get("TYPE_TEXT").is_none());
         assert!(q["questions"].get("type_text_target").is_none());
+    }
+
+    #[test]
+    fn move_question_marks_only_search_like_controls() {
+        let fields = vec![element("click", 1, "e1", "Celulares"), element("fill", 2, "e2", "Buscar")];
+        let page = Observation { url: "https://www.exito.com/".into(), ..Default::default() };
+        let q = move_question("search for a phone", &page, &fields, &[], &[], true);
+        let elements = q["state"]["elements"].as_array().expect("elements are offered").clone();
+        let has_flag = |label: &str| {
+            elements.iter().find(|e| e["label"] == label).expect("the element is offered").get("search_like").is_some()
+        };
+        assert!(!has_flag("Celulares"), "a category link is not a search control");
+        let rules = q["questions"]["operation"]["instructions"]["rules"].as_str().unwrap();
+        assert!(rules.contains("search_like"), "the move instructions explain the flag: {rules}");
+        assert!(rules.contains("CLICK it first"), "…and what to do about the control that carries it");
     }
 }
