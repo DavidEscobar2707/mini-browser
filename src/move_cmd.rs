@@ -11,6 +11,7 @@
 //! used here: this is the operator's own browser session. Non-loopback hosts
 //! need an explicit `--allow-remote`.
 
+use crate::affordance;
 use crate::text_helper::{self, TextHelper};
 use crate::cdp::Cdp;
 use crate::episodes;
@@ -353,10 +354,31 @@ for a list, or a page for a different place, date, or subject than the goal name
 
 /// Above this, the page counts as meeting the goal on its own (no DONE needed).
 const GOAL_MET_AT: f64 = 0.7;
-/// Jev's DONE is vetoed only when the goal check is clearly negative. The
-/// check is conservative (a correct results page scored ~0.43, pages one click
-/// off scored 0.03–0.24), so it vetoes, it does not have to agree.
-const DONE_VETO_BELOW: f64 = 0.3;
+/// Jev's DONE is accepted only with evidence: the same-request goal check must
+/// say the page holds the answer. The benchmark's one false `ok` was a DONE
+/// taken on a page whose own check scored 0.03. Below this the claim is
+/// disputed like any unsupported DONE — three of them end the run as a
+/// failure, never as `ok`.
+const DONE_EVIDENCE_AT: f64 = 0.5;
+
+/// Whether Jev's DONE is supported by the page it was claimed on.
+pub fn done_has_evidence(goal_met: Option<f64>) -> bool {
+    goal_met.is_some_and(|p| p >= DONE_EVIDENCE_AT)
+}
+
+/// Whether Mini should open the real search field itself instead of taking
+/// Jev's terminal answer: Jev either gave up (BLOCKED) or claimed DONE with no
+/// evidence the goal is on the page. A page the goal check already passed is
+/// left alone — the recovery must not walk away from the answer. On Éxito and
+/// Ktronix the search box is a click-only textbox: the click is what opens the
+/// field that can be typed into. The caller checks the goal wants a search,
+/// and that such a control is still untried.
+pub fn search_recovery_wanted(operation: &str, goal_met: Option<f64>) -> bool {
+    if goal_met.is_some_and(|p| p >= GOAL_MET_AT) {
+        return false;
+    }
+    matches!(operation, "BLOCKED" | "DONE")
+}
 
 fn add_goal_check(question: &mut Value, goal: &str) {
     if let Some(q) = question["questions"].as_object_mut() {
@@ -381,9 +403,59 @@ fn decide(judge: &dyn Judge, question: &Value, candidates: &[ObservedElement]) -
     Ok(Decision { operation: op.choice, confidence: op.confidence, target, goal_met })
 }
 
+/// What PRESS_ENTER must do about focus.
+#[derive(Debug, PartialEq)]
+pub enum EnterFocus {
+    /// A text field already has focus: press Enter now.
+    Press,
+    /// Put focus back on the field the run last typed into, then press Enter.
+    Refocus(u64),
+    /// Nothing to press into: refuse the step (as before).
+    Refuse,
+}
+
+/// The PRESS_ENTER refocus decision. `focused` is what the page reports as the
+/// active element; `typed_node` is the field the last TYPE_TEXT wrote into
+/// (its stable per-node id), `alive` whether that field is still in the
+/// document. Booking.com's destination autocomplete steals focus the moment
+/// its suggestion list opens, and the PRESS_ENTER that follows was then
+/// refused with "no text field has focus".
+pub fn enter_focus(focused: bool, typed_node: Option<u64>, alive: bool) -> EnterFocus {
+    if focused {
+        return EnterFocus::Press;
+    }
+    match typed_node {
+        Some(node) if alive => EnterFocus::Refocus(node),
+        _ => EnterFocus::Refuse,
+    }
+}
+
+/// The field the run last typed into, kept for the PRESS_ENTER that submits
+/// it. Only the node id is kept: the element itself is re-resolved on the live
+/// page, so a field that left the document is recognized as gone.
+#[derive(Default)]
+struct Typing {
+    last_node: Option<u64>,
+}
+
+impl Typing {
+    fn typed(&mut self, el: &ObservedElement) {
+        self.last_node = Some(el.node);
+    }
+}
+
+/// Does the page have a text field focused right now.
+const FOCUSED_TEXT_FIELD: &str =
+    "(() => { const e = document.activeElement; return !!e && (e.isContentEditable || /^(INPUT|TEXTAREA)$/.test(e.tagName)); })()";
+
+/// Whether a snapshot node (its stable per-node id) is still in the document.
+fn node_alive_probe(node: u64) -> String {
+    format!("(() => {{ const el = window.__miniQA.__dom.nodeFor({node}); return !!(el && el.isConnected); }})()")
+}
+
 /// Executes one decided step; `typed` is the resolved TYPE_TEXT value.
 /// Returns a note when the step was refused rather than executed.
-fn perform(cdp: &mut Cdp, d: &Decision, typed: Option<&str>) -> Result<Option<String>, String> {
+fn perform(cdp: &mut Cdp, d: &Decision, typed: Option<&str>, typing: &mut Typing) -> Result<Option<String>, String> {
     let id = d.target.as_ref().map(|t| json!(t.id).to_string());
     match d.operation.as_str() {
         "CLICK" => {
@@ -414,6 +486,11 @@ fn perform(cdp: &mut Cdp, d: &Decision, typed: Option<&str>) -> Result<Option<St
             }
             cdp.select_all()?;
             cdp.key_text(value)?;
+            // The PRESS_ENTER that submits this field may come a step later,
+            // after an autocomplete popup took focus away from it.
+            if let Some(el) = d.target.as_ref() {
+                typing.typed(el);
+            }
             Ok(None)
         }
         "SELECT" => {
@@ -428,11 +505,20 @@ fn perform(cdp: &mut Cdp, d: &Decision, typed: Option<&str>) -> Result<Option<St
             Ok(None)
         }
         "PRESS_ENTER" => {
-            let focused = cdp.eval(
-                "(() => { const e = document.activeElement; return !!e && (e.isContentEditable || /^(INPUT|TEXTAREA)$/.test(e.tagName)); })()",
-            )?;
-            if focused != "true" {
-                return Ok(Some("not pressed: no text field has focus".into()));
+            let focused = cdp.eval(FOCUSED_TEXT_FIELD)? == "true";
+            let alive = match typing.last_node {
+                Some(node) if !focused => cdp.eval(&node_alive_probe(node))? == "true",
+                _ => false,
+            };
+            match enter_focus(focused, typing.last_node, alive) {
+                EnterFocus::Press => {}
+                EnterFocus::Refocus(node) => {
+                    let out = cdp.eval(&format!("window.__miniQA.act('focus_node', {node})"))?;
+                    if !out.contains("\"ok\":true") {
+                        return Ok(Some("not pressed: the field typed into is gone".into()));
+                    }
+                }
+                EnterFocus::Refuse => return Ok(Some("not pressed: no text field has focus".into())),
             }
             cdp.press_enter()?;
             Ok(None)
@@ -516,7 +602,10 @@ const SITE_NOTES: usize = 1500;
 /// Offers PRESS_ENTER right after a TYPE_TEXT on the same page: many search
 /// boxes (GitHub, Mercado Libre) have no clickable submit.
 fn offer_enter(question: &mut Value, history: &[StepRecord], steps: &[MoveStep], url: &str) {
-    let last_typed_here = steps.last().is_some_and(|s| s.operation == "TYPE_TEXT" && s.note.is_none() && s.url == url);
+    // The last step the run took, not the last row in the report: an automatic
+    // scroll-through says nothing about typed text (plan 007 §1).
+    let last = steps.iter().rev().find(|s| counts_as_action(&s.operation));
+    let last_typed_here = last.is_some_and(|s| s.operation == "TYPE_TEXT" && s.note.is_none() && s.url == url);
     let _ = history;
     if !last_typed_here {
         return;
@@ -597,10 +686,58 @@ pub fn rest_of_page(visible: &str, full: &str, cap: usize) -> String {
     out
 }
 
-/// Scrolls to the end in steps (lazy lists load), then back to the top.
+/// Scrolls to the end in steps (lazy lists load), then back to where the page
+/// was: the run must not move the operator's view (a plain `scrollTo(0, 0)`
+/// bounced every page to the top and read as an oscillation).
 const SCROLL_THROUGH: &str = "(async () => { const pause = ms => new Promise(r => setTimeout(r, ms)); \
-    let last = -1; for (let i = 0; i < 40 && scrollY !== last; i++) { last = scrollY; \
-    scrollBy(0, innerHeight * 0.9); await pause(150); } await pause(600); scrollTo(0, 0); await pause(100); return true; })()";
+    const back = scrollY; let last = -1; for (let i = 0; i < 40 && scrollY !== last; i++) { last = scrollY; \
+    scrollBy(0, innerHeight * 0.9); await pause(150); } await pause(600); scrollTo(0, back); await pause(100); return true; })()";
+
+/// Operation of the report's record of an automatic scroll-through: Mini loads
+/// lazy content itself, Jev never chose it.
+const AUTO_SCROLL: &str = "AUTO_SCROLL";
+const AUTO_SCROLL_NOTE: &str = "load lazy content";
+
+/// Whether a step is an action the run spent its budget on. An automatic
+/// scroll-through is not: it is Mini loading a page, not a move towards the
+/// goal.
+pub fn counts_as_action(operation: &str) -> bool {
+    operation != AUTO_SCROLL
+}
+
+/// The actions taken in `steps`. The step budget counts these, never the
+/// scroll-throughs in between.
+pub fn actions_taken(steps: &[MoveStep]) -> usize {
+    steps.iter().filter(|s| counts_as_action(&s.operation)).count()
+}
+
+/// Records a step in the run's timeline, numbered by its place in it.
+fn push_step(steps: &mut Vec<MoveStep>, mut step: MoveStep) {
+    step.step = steps.len() + 1;
+    steps.push(step);
+}
+
+/// The report's record of an automatic scroll-through: the page the run was
+/// on, and the snapshot compare around the scroll, so the operator sees
+/// whether loading the lazy content changed anything. It is not an action, so
+/// it costs no step budget and is never offered to Jev as history.
+fn auto_scroll_step(before: &Observation, after: &Observation, ms: u64) -> MoveStep {
+    MoveStep {
+        step: 0,
+        operation: AUTO_SCROLL.into(),
+        target: None,
+        field: None,
+        text: None,
+        confidence: 1.0,
+        goal_met: None,
+        url: before.url.clone(),
+        page_sig: episodes::page_signature(&before.url, &control_labels(&before.actions)),
+        page_changed: page_changed(before, after),
+        prior_return: None,
+        note: Some(AUTO_SCROLL_NOTE.into()),
+        ms,
+    }
+}
 
 fn full_text(cdp: &mut Cdp) -> String {
     cdp.eval_within("document.body ? document.body.innerText : ''", EVAL_TIMEOUT)
@@ -614,18 +751,43 @@ fn load_whole_page(cdp: &mut Cdp) {
     let _ = cdp.eval_within(SCROLL_THROUGH, Duration::from_secs(15));
 }
 
+/// Loads lazy content on the page the run is stuck on (`BLOCKED`, or steps
+/// that changed nothing) and records it: the same automatic load as a first
+/// visit, so it is not an action and never reaches Jev.
+fn recovery_scroll(cdp: &mut Cdp, steps: &mut Vec<MoveStep>, before: &Observation) {
+    let started = Instant::now();
+    load_whole_page(cdp);
+    if let Ok(after) = snapshot(cdp) {
+        push_step(steps, auto_scroll_step(before, &after, started.elapsed().as_millis() as u64));
+    }
+}
+
 /// One observation of the current page, with lazy content loaded the first
-/// time this run reaches that URL: scrolling through loads results and
-/// showtimes before Jev is asked to judge the page. Only on a new URL —
+/// time this run reaches a URL that needs it: scrolling through loads results
+/// and showtimes before Jev is asked to judge the page. Only on a new URL —
 /// scrolling would close an open drop-down on the current one. Replay and the
 /// Jev loop share one set of visited URLs, so a page is never scrolled twice.
-fn loaded_snapshot(cdp: &mut Cdp, loaded: &mut std::collections::HashSet<String>) -> Result<Observation, String> {
+///
+/// A page that is complete (no loading placeholder, a whole-page text longer
+/// than the visible one) is left alone: the report reads the DOM text without
+/// scrolling, so the bounce would buy nothing. The scroll-through itself comes
+/// back as the report's AUTO_SCROLL step.
+fn loaded_snapshot(
+    cdp: &mut Cdp,
+    loaded: &mut std::collections::HashSet<String>,
+) -> Result<(Observation, Option<MoveStep>), String> {
     let before = snapshot(cdp)?;
     if !loaded.insert(before.url.clone()) {
-        return Ok(before);
+        return Ok((before, None));
     }
+    if !affordance::needs_scroll_through(&before.text, &full_text(cdp), None) {
+        return Ok((before, None));
+    }
+    let started = Instant::now();
     load_whole_page(cdp);
-    snapshot(cdp)
+    let after = snapshot(cdp)?;
+    let step = auto_scroll_step(&before, &after, started.elapsed().as_millis() as u64);
+    Ok((after, Some(step)))
 }
 
 /// How long the whole-page text must hold its length before the report calls
@@ -716,14 +878,50 @@ fn label_head(label: &str) -> &str {
     label.split(" \u{2192} ").next().unwrap_or(label).trim()
 }
 
-/// The candidate a CLICK route step names, matched on the label head. `None`
-/// when this page no longer offers that control: replay stops there instead of
-/// clicking whatever else looks close.
+/// How similar a route's control name must be to the label this page offers
+/// for replay to use it anyway (`affordance::label_similarity`).
+const FUZZY_MATCH: f64 = 0.5;
+
+/// The candidate a CLICK route step names. The stored label is matched on its
+/// head first — that is the control the run logged. A drop-down whose label
+/// carries the current selection ("Seleccionar Teatro Todos los teatros icon:
+/// down" against "… Arkadia icon: down") no longer matches exactly, so the
+/// closest candidate of the same role wins when it scores at least
+/// `FUZZY_MATCH`. `None` when this page offers neither: replay stops there
+/// instead of clicking whatever else looks close.
 fn clicked_for_step<'a>(candidates: &'a [ObservedElement], step: &episodes::RouteStep) -> Option<&'a ObservedElement> {
     let want = label_head(step.target.as_deref()?);
-    candidates
+    let clickable: Vec<&ObservedElement> = candidates
         .iter()
-        .find(|el| matches!(el.kind.as_str(), "click" | "fill" | "select") && label_head(&el.label) == want)
+        .filter(|el| matches!(el.kind.as_str(), "click" | "fill" | "select"))
+        .collect();
+    if let Some(el) = clickable.iter().find(|el| label_head(&el.label) == want) {
+        return Some(el);
+    }
+    best_match(&clickable, want, |a, b| affordance::label_similarity(a, b))
+}
+
+/// The closest candidate to `want`: the highest `score`, and on a tie the
+/// first in DOM order among the candidates that share the winning candidate's
+/// role. A route step names no role of its own, so the role can only break a
+/// tie — it never widens the search to a control of another kind. `None` below
+/// [`FUZZY_MATCH`], so a page that merely resembles the route is not clicked.
+/// `score` is passed in: the similarity rule lives in `affordance`, this is the
+/// choice built on it.
+pub fn best_match<'a>(
+    candidates: &[&'a ObservedElement],
+    want: &str,
+    score: impl Fn(&str, &str) -> f64,
+) -> Option<&'a ObservedElement> {
+    let mut best = 0.0f64;
+    for el in candidates {
+        best = best.max(score(label_head(&el.label), want));
+    }
+    if best < FUZZY_MATCH {
+        return None;
+    }
+    let role = candidates.iter().find(|el| score(label_head(&el.label), want) >= best)?.role.clone();
+    candidates.iter().find(|el| el.role == role && score(label_head(&el.label), want) >= best).copied()
 }
 
 /// Whether the live page is the one a route step ran on: the path part of the
@@ -770,15 +968,20 @@ fn replay_route(
 ) -> Replay {
     let budget = a.steps.saturating_sub(1);
     let mut steps: Vec<MoveStep> = Vec::new();
+    // Replay performs no TYPE_TEXT, so it has nothing to refocus for Enter.
+    let mut typing = Typing::default();
     for (i, step) in route.steps.iter().enumerate() {
         let k = i + 1;
         if i >= budget {
             return replay_broke(k, format!("step budget of {budget} replayed steps reached"), steps);
         }
-        let before = match loaded_snapshot(cdp, loaded) {
+        let (before, auto) = match loaded_snapshot(cdp, loaded) {
             Ok(o) => o,
             Err(e) => return replay_broke(k, e, steps),
         };
+        if let Some(step) = auto {
+            push_step(&mut steps, step);
+        }
         if !a.allow_remote && !is_loopback_host(&before.url) {
             return replay_broke(k, format!("navigated off loopback to {}", firewall::host_only(&before.url)), steps);
         }
@@ -812,7 +1015,7 @@ fn replay_route(
         let step_started = Instant::now();
         let decision =
             Decision { operation: step.operation.clone(), confidence: REPLAY_CONFIDENCE, target, goal_met: None };
-        let refusal = match perform(cdp, &decision, None) {
+        let refusal = match perform(cdp, &decision, None, &mut typing) {
             Ok(note) => note,
             Err(e) => Some(format!("action failed: {e}")),
         };
@@ -822,23 +1025,26 @@ fn replay_route(
         after_input(cdp, false);
         let after = snapshot(cdp).unwrap_or_default();
         let changed = page_changed(&before, &after);
-        steps.push(MoveStep {
-            step: k,
-            operation: decision.operation.clone(),
-            // The label this page offered: what the run really clicked, which
-            // is what the next episode should aggregate the action by.
-            target: decision.target.as_ref().map(|el| el.label.clone()).or_else(|| step.target.clone()),
-            field: None,
-            text: None,
-            confidence: REPLAY_CONFIDENCE,
-            goal_met: None,
-            url: before.url.clone(),
-            page_sig,
-            page_changed: changed,
-            prior_return: None,
-            note: Some("replay".into()),
-            ms: step_started.elapsed().as_millis() as u64,
-        });
+        push_step(
+            &mut steps,
+            MoveStep {
+                step: 0,
+                operation: decision.operation.clone(),
+                // The label this page offered: what the run really clicked, which
+                // is what the next episode should aggregate the action by.
+                target: decision.target.as_ref().map(|el| el.label.clone()).or_else(|| step.target.clone()),
+                field: None,
+                text: None,
+                confidence: REPLAY_CONFIDENCE,
+                goal_met: None,
+                url: before.url.clone(),
+                page_sig,
+                page_changed: changed,
+                prior_return: None,
+                note: Some("replay".into()),
+                ms: step_started.elapsed().as_millis() as u64,
+            },
+        );
         if !changed {
             return replay_broke(k, "the page did not change".into(), steps);
         }
@@ -868,6 +1074,93 @@ fn replay_for(cdp: &mut Cdp, a: &MoveArgs, url_before: &str, loaded: &mut std::c
     replay
 }
 
+/// How many times one run may open a search field itself (plan 007 §2).
+const MAX_SEARCH_OPENS: usize = 2;
+
+/// Mini's own search-opening clicks: a run tries a given control once, and the
+/// whole run does it at most [`MAX_SEARCH_OPENS`] times, so a page whose only
+/// offered control is a fake search box cannot loop.
+#[derive(Default)]
+struct SearchOpener {
+    tried: std::collections::HashSet<u64>,
+    opens: usize,
+}
+
+impl SearchOpener {
+    /// The control Mini should click itself, or `None` when it has no move
+    /// left. `is_trigger` is the affordance rule (`is_fake_search_trigger` here).
+    fn next<'a>(
+        &self,
+        candidates: &'a [ObservedElement],
+        is_trigger: impl Fn(&ObservedElement) -> bool,
+    ) -> Option<&'a ObservedElement> {
+        if self.opens >= MAX_SEARCH_OPENS {
+            return None;
+        }
+        candidates.iter().find(|el| is_trigger(el) && !self.tried.contains(&el.node))
+    }
+
+    fn record(&mut self, el: &ObservedElement) {
+        self.tried.insert(el.node);
+        self.opens += 1;
+    }
+}
+
+/// Mini opens the real search field itself: a click on the control Jev cannot
+/// type into. It is an action, so the step is logged and offered to Jev like
+/// any other click — with the note the operator reads in the report — and a
+/// trigger that changed nothing is retired like any other dead control.
+fn open_search(
+    cdp: &mut Cdp,
+    el: &ObservedElement,
+    before: &Observation,
+    guard: &mut LoopGuard,
+    steps: &mut Vec<MoveStep>,
+    history: &mut Vec<StepRecord>,
+) {
+    let started = Instant::now();
+    let decision =
+        Decision { operation: "CLICK".into(), confidence: 1.0, target: Some(el.clone()), goal_met: None };
+    let note = match perform(cdp, &decision, None, &mut Typing::default()) {
+        Ok(None) => "opened search".to_string(),
+        Ok(Some(why)) => format!("opened search: {why}"),
+        Err(e) => format!("opened search failed: {e}"),
+    };
+    let refused = note != "opened search";
+    after_input(cdp, false);
+    let after = snapshot(cdp).unwrap_or_default();
+    let changed = page_changed(before, &after);
+    let label = Some(el.label.clone());
+    push_step(
+        steps,
+        MoveStep {
+            step: 0,
+            operation: "CLICK".into(),
+            target: label.clone(),
+            field: None,
+            text: None,
+            confidence: 1.0,
+            goal_met: None,
+            url: before.url.clone(),
+            page_sig: episodes::page_signature(&before.url, &control_labels(&before.actions)),
+            page_changed: changed,
+            prior_return: None,
+            note: Some(note.clone()),
+            ms: started.elapsed().as_millis() as u64,
+        },
+    );
+    history.push(StepRecord {
+        step: steps.len(),
+        operation: "CLICK".into(),
+        target_label: label,
+        page_changed: changed,
+        note: Some(note),
+        confidence: 1.0,
+        ..Default::default()
+    });
+    guard.record(&before.url, el, changed, refused);
+}
+
 /// The loop, over the I/O seams, so it can run against a fake judge in tests.
 fn run_loop(cdp: &mut Cdp, judge: &dyn Judge, helper: Option<&TextHelper>, a: &MoveArgs) -> MoveReport {
     let started = Instant::now();
@@ -881,6 +1174,12 @@ fn run_loop(cdp: &mut Cdp, judge: &dyn Judge, helper: Option<&TextHelper>, a: &M
     let mut text_calls = 0u32;
     let mut last_page = Observation::default();
     let mut guard = LoopGuard::default();
+    // The field the last TYPE_TEXT wrote into, for a PRESS_ENTER whose focus
+    // an autocomplete popup stole.
+    let mut typing = Typing::default();
+    // Mini's own clicks on a search control Jev cannot type into ("search_like"
+    // textboxes on Éxito/Ktronix), bounded per run (plan 007 §2).
+    let mut opener = SearchOpener::default();
     // Page most likely to meet the goal so far: (probability, URL).
     let mut best: Option<(f64, String)> = None;
     let mut done_disputed = 0usize;
@@ -897,20 +1196,23 @@ fn run_loop(cdp: &mut Cdp, judge: &dyn Judge, helper: Option<&TextHelper>, a: &M
     // Jev call. Its steps are the run's first steps, so they count against the
     // same step budget and reach the episode log like any other step.
     let mut replay = replay_for(cdp, a, &url_before, &mut loaded);
-    let replayed = replay.steps.len();
+    let replayed = actions_taken(&replay.steps);
     steps.append(&mut replay.steps);
 
     let mut stop = loop {
-        if steps.len() >= a.steps {
+        if actions_taken(&steps) >= a.steps {
             break format!("step budget of {} reached", a.steps);
         }
         if started.elapsed() > WALL_CLOCK {
             break format!("wall clock of {}s reached", WALL_CLOCK.as_secs());
         }
-        let before = match loaded_snapshot(cdp, &mut loaded) {
+        let (before, auto) = match loaded_snapshot(cdp, &mut loaded) {
             Ok(o) => o,
             Err(e) => break format!("snapshot failed: {e}"),
         };
+        if let Some(step) = auto {
+            push_step(&mut steps, step);
+        }
         if !a.allow_remote && !is_loopback_host(&before.url) {
             break format!("navigated off loopback to {}; rerun with --allow-remote", firewall::host_only(&before.url));
         }
@@ -954,14 +1256,30 @@ fn run_loop(cdp: &mut Cdp, judge: &dyn Judge, helper: Option<&TextHelper>, a: &M
                 break format!("the goal check passed on this page (p={p:.2})");
             }
         }
-        // Jev's DONE must agree with the goal check on the same page.
-        if decision.operation == "DONE" && decision.goal_met.is_some_and(|p| p < DONE_VETO_BELOW) {
+        // Jev cannot type into a search box that is really a click-only
+        // textbox (Éxito, Ktronix): on such a page it answers BLOCKED, or
+        // claims DONE on a page that shows nothing. When the goal wants a
+        // search, Mini clicks that control itself and looks at what it opened.
+        if affordance::goal_wants_search(&a.goal)
+            && search_recovery_wanted(&decision.operation, decision.goal_met)
+        {
+            if let Some(el) = opener.next(&candidates, affordance::is_fake_search_trigger) {
+                open_search(cdp, &el, &before, &mut guard, &mut steps, &mut history);
+                opener.record(&el);
+                no_change = 0;
+                continue;
+            }
+        }
+        // Jev's DONE needs the same page's goal check to back it up: a DONE
+        // with no evidence is disputed, and three of them end the run as a
+        // failure.
+        if decision.operation == "DONE" && !done_has_evidence(decision.goal_met) {
             done_disputed += 1;
             if done_disputed > 2 {
                 // Jev insists but its own goal check disagrees: not a success.
                 break "DONE claimed three times, but the goal check never passed".to_string();
             }
-            let why = "DONE rejected: the goal check says this page does not show the answer yet";
+            let why = "DONE rejected: the goal check found no evidence on this page";
             steps.push(MoveStep {
                 step: steps.len() + 1,
                 operation: "DONE".into(),
@@ -995,7 +1313,7 @@ fn run_loop(cdp: &mut Cdp, judge: &dyn Judge, helper: Option<&TextHelper>, a: &M
             // Before accepting BLOCKED, load lazy content once and ask again:
             // the evidence is often further down, still "loading".
             if reloaded.insert(before.url.clone()) {
-                load_whole_page(cdp);
+                recovery_scroll(cdp, &mut steps, &before);
                 continue;
             }
             break "the judge reported no operation can progress".to_string();
@@ -1023,7 +1341,7 @@ fn run_loop(cdp: &mut Cdp, judge: &dyn Judge, helper: Option<&TextHelper>, a: &M
             }
         }
         if note.is_none() {
-            note = match perform(cdp, &decision, typed_value.as_deref()) {
+            note = match perform(cdp, &decision, typed_value.as_deref(), &mut typing) {
                 Ok(n) => n,
                 Err(e) => Some(format!("action failed: {e}")),
             };
@@ -1076,7 +1394,7 @@ fn run_loop(cdp: &mut Cdp, judge: &dyn Judge, helper: Option<&TextHelper>, a: &M
         no_change = if changed && !refused { 0 } else { no_change + 1 };
         if no_change >= NO_CHANGE_LIMIT {
             if reloaded.insert(before.url.clone()) {
-                load_whole_page(cdp);
+                recovery_scroll(cdp, &mut steps, &before);
                 no_change = 0;
                 continue;
             }
@@ -1108,7 +1426,12 @@ fn run_loop(cdp: &mut Cdp, judge: &dyn Judge, helper: Option<&TextHelper>, a: &M
     }
     // The caller reads the result from the report: return the whole page once
     // it has settled, without any line that only says something is loading.
-    load_whole_page(cdp);
+    // The text comes from the DOM, so the scroll-through is only worth its
+    // bounce when lazy content is actually missing.
+    let full = full_text(cdp);
+    if affordance::needs_scroll_through(&last_page.text, &full, None) {
+        recovery_scroll(cdp, &mut steps, &last_page);
+    }
     let whole = drop_loading_lines(&settled_page_text(cdp));
     if !whole.trim().is_empty() {
         last_page.text = whole.chars().take(REPORT_TEXT).collect();
@@ -1129,6 +1452,22 @@ fn run_loop(cdp: &mut Cdp, judge: &dyn Judge, helper: Option<&TextHelper>, a: &M
         title: last_page.title,
         page_text: last_page.text,
     }
+}
+
+/// Characters of rendered text that make a page usable even while it is still
+/// loading: a heavy storefront that never reaches `complete` in 20 s still has
+/// its search box and results on screen.
+const SOFT_LOAD_TEXT: usize = 200;
+
+/// The error `wait_for_load` raises when the page never finished.
+pub fn is_load_timeout(error: &str) -> bool {
+    error.contains("page did not finish loading")
+}
+
+/// Whether a page that never reached `complete` is usable anyway: it is
+/// interactive, or it has rendered enough text to work with.
+pub fn soft_load_ok(ready_state: &str, rendered_chars: usize) -> bool {
+    matches!(ready_state, "interactive" | "complete") || rendered_chars > SOFT_LOAD_TEXT
 }
 
 pub fn run(args: &[String], index: usize) -> i32 {
@@ -1160,7 +1499,19 @@ pub fn run(args: &[String], index: usize) -> i32 {
             );
         }
         if let Err(e) = cdp.navigate(&resolved).and_then(|_| cdp.wait_for_load(Duration::from_secs(20))) {
-            return fail("move", &e);
+            // A heavy page (homecenter) renders its search box long before
+            // `complete`; failing the run there threw away a usable page.
+            if !is_load_timeout(&e) {
+                return fail("move", &e);
+            }
+            let state = cdp.eval("document.readyState").map(|s| s.trim_matches('"').to_string()).unwrap_or_default();
+            let rendered = full_text(&mut cdp).chars().count();
+            if !soft_load_ok(&state, rendered) {
+                return fail("move", &e);
+            }
+            eprintln!(
+                "mini --move: {e} (continuing: document.readyState is {state}, {rendered} characters rendered)"
+            );
         }
     }
     let url = cdp.eval("location.href").map(|s| s.trim_matches('"').to_string()).unwrap_or_default();
@@ -1212,10 +1563,13 @@ fn log_episode(report: &mut MoveReport, goal: &str) {
 }
 
 /// The run's steps as the episode log wants them: the page each step started
-/// on, whether it changed, and Jev's goal check for that page.
+/// on, whether it changed, and Jev's goal check for that page. The automatic
+/// scroll-throughs stay out: they are not actions, so they must not become an
+/// episode step, a "helps" bullet (`--learn`) or a replayable route step.
 fn raw_steps(steps: &[MoveStep]) -> Vec<episodes::RawStep> {
     steps
         .iter()
+        .filter(|s| counts_as_action(&s.operation))
         .map(|s| episodes::RawStep {
             step: s.step,
             operation: s.operation.clone(),
@@ -1733,6 +2087,161 @@ mod tests {
         assert_eq!(raw[0].goal_met, Some(0.2), "the episode log gets the goal check of the page the step started on");
         assert_eq!(raw[0].target.as_deref(), Some("Search"));
         assert_eq!(raw[0].ms, 12);
+    }
+
+    /// A report step with the fields this test group cares about.
+    fn move_step(operation: &str, step: usize) -> MoveStep {
+        MoveStep {
+            step,
+            operation: operation.into(),
+            target: None,
+            field: None,
+            text: None,
+            confidence: 1.0,
+            goal_met: None,
+            url: String::new(),
+            page_sig: String::new(),
+            page_changed: true,
+            prior_return: None,
+            note: None,
+            ms: 1,
+        }
+    }
+
+    #[test]
+    fn auto_scroll_rows_cost_no_step_budget() {
+        let steps = vec![
+            move_step(AUTO_SCROLL, 1),
+            move_step("CLICK", 2),
+            move_step(AUTO_SCROLL, 3),
+            move_step("TYPE_TEXT", 4),
+        ];
+        assert_eq!(actions_taken(&steps), 2, "only what the run decided on is an action");
+        assert!(!counts_as_action(AUTO_SCROLL));
+        assert!(counts_as_action("SCROLL_DOWN"), "a scroll the run chose is an action");
+    }
+
+    #[test]
+    fn the_report_records_a_scroll_through_as_an_auto_scroll_step() {
+        let before =
+            Observation { url: "https://www.exito.com/".into(), text: "Cargando\u{2026}".into(), ..Default::default() };
+        let after = Observation { url: "https://www.exito.com/".into(), marker: json!("m2"), ..Default::default() };
+        let mut steps = vec![move_step("CLICK", 99)];
+        push_step(&mut steps, auto_scroll_step(&before, &after, 4200));
+        push_step(&mut steps, auto_scroll_step(&before, &before, 0));
+        let auto = &steps[1];
+        assert_eq!(auto.step, 2, "numbered by its place in the timeline, after the step already recorded");
+        assert_eq!(auto.operation, AUTO_SCROLL);
+        assert_eq!(auto.note.as_deref(), Some("load lazy content"));
+        assert_eq!(auto.url, "https://www.exito.com/");
+        assert!(auto.page_changed, "the snapshot compare around the scroll decides this");
+        assert_eq!(auto.ms, 4200);
+        assert!(auto.goal_met.is_none(), "an automatic load is not Jev's step");
+        assert!(!steps[2].page_changed, "a scroll that changed nothing is recorded as such");
+    }
+
+    #[test]
+    fn the_episode_log_keeps_auto_scrolls_out() {
+        let auto = auto_scroll_step(&Observation::default(), &Observation::default(), 5);
+        let raw = raw_steps(&[move_step("CLICK", 1), auto]);
+        assert_eq!(raw.len(), 1, "a load is not an episode step: no 'helps' bullet, no replayable route step");
+        assert_eq!(raw[0].operation, "CLICK");
+        assert_eq!(raw[0].step, 1, "the surviving action keeps its own number");
+    }
+
+    #[test]
+    fn press_enter_refocuses_the_field_that_was_typed_into() {
+        assert_eq!(enter_focus(true, None, false), EnterFocus::Press, "the page already has a text field focused");
+        assert_eq!(enter_focus(true, Some(12), true), EnterFocus::Press, "no refocus when the focus is already right");
+        assert_eq!(enter_focus(false, Some(12), true), EnterFocus::Refocus(12), "the autocomplete stole the focus");
+        assert_eq!(enter_focus(false, Some(12), false), EnterFocus::Refuse, "the refusal stays only once the field is gone");
+        assert_eq!(enter_focus(false, None, false), EnterFocus::Refuse, "nothing was typed into in this run");
+    }
+
+    #[test]
+    fn done_needs_the_goal_check_before_it_is_believed() {
+        assert!(done_has_evidence(Some(0.5)), "the threshold itself is evidence");
+        assert!(done_has_evidence(Some(0.92)));
+        assert!(!done_has_evidence(Some(0.49)), "just below the bar is a disputed DONE");
+        assert!(!done_has_evidence(Some(0.03)), "the benchmark's false ok scored 0.03");
+        assert!(!done_has_evidence(None), "no goal check at all is no evidence");
+    }
+
+    #[test]
+    fn mini_opens_the_search_field_only_when_jev_cannot_progress() {
+        assert!(search_recovery_wanted("BLOCKED", None));
+        assert!(search_recovery_wanted("BLOCKED", Some(0.2)));
+        assert!(search_recovery_wanted("DONE", Some(0.2)), "a DONE the goal check does not back up");
+        assert!(!search_recovery_wanted("CLICK", Some(0.2)), "a decided step is not a dead end");
+        assert!(!search_recovery_wanted("BLOCKED", Some(0.9)), "never click away from a page that answers the goal");
+        assert!(!search_recovery_wanted("DONE", Some(0.7)), "0.7 already ends the run as ok before this is asked");
+    }
+
+    #[test]
+    fn the_search_opener_tries_each_trigger_once_inside_its_budget() {
+        let trigger = |label: &str, node: u64| ObservedElement {
+            node,
+            kind: "click".into(),
+            role: Some("textbox".into()),
+            label: label.into(),
+            ..Default::default()
+        };
+        let candidates = vec![trigger("Open search", 7), trigger("Abrir b\u{fa}squeda", 8)];
+        let is_trigger = |el: &ObservedElement| el.label.starts_with("Open") || el.label.starts_with("Abrir");
+        let mut opener = SearchOpener::default();
+        let first = opener.next(&candidates, is_trigger).expect("the first untried trigger is offered");
+        assert_eq!(first.node, 7);
+        opener.record(first);
+        let second = opener.next(&candidates, is_trigger).expect("the budget allows one more open");
+        assert_eq!(second.node, 8, "the control it already clicked is not offered again");
+        opener.record(second);
+        assert!(opener.next(&candidates, is_trigger).is_none(), "at most two opens per run");
+        let none: Vec<ObservedElement> = Vec::new();
+        assert!(SearchOpener::default().next(&none, is_trigger).is_none(), "no candidates, no move");
+    }
+
+    #[test]
+    fn a_heavy_page_that_never_finishes_loading_is_still_usable() {
+        assert!(is_load_timeout("page did not finish loading"), "only the load timeout is treated this way");
+        assert!(!is_load_timeout("navigation failed: net::ERR_NAME_NOT_RESOLVED"));
+        assert!(soft_load_ok("interactive", 0), "the page is usable while it is still loading");
+        assert!(soft_load_ok("complete", 0));
+        assert!(soft_load_ok("loading", 900), "a storefront renders its search box long before complete");
+        assert!(!soft_load_ok("loading", 200), "200 characters is not enough to work with");
+        assert!(!soft_load_ok("loading", 0));
+    }
+
+    #[test]
+    fn the_fuzzy_replay_match_takes_the_best_score_first_in_dom_order() {
+        let el = |role: &str, label: &str| ObservedElement {
+            role: Some(role.into()),
+            label: label.into(),
+            kind: "click".into(),
+            ..Default::default()
+        };
+        // Hand-made scores: this is the choice made over the similarity rule,
+        // not the rule itself (which lives in `affordance`).
+        let score = |label: &str, _want: &str| match label {
+            "Seleccionar Teatro" | "Seleccionar Teatro Arkadia" => 0.62,
+            _ => 0.1,
+        };
+        let candidates = vec![
+            el("button", "Seleccionar Teatro"),
+            el("button", "Seleccionar Teatro Arkadia"),
+            el("link", "Cartelera"),
+        ];
+        let refs: Vec<&ObservedElement> = candidates.iter().collect();
+        let picked =
+            best_match(&refs, "Seleccionar Teatro Todos los teatros", score).expect("0.62 clears the bar");
+        assert_eq!(picked.label, "Seleccionar Teatro", "equal scores go to the first in DOM order");
+        let weak = vec![el("button", "Cartelera"), el("button", "Ayuda")];
+        let weak_refs: Vec<&ObservedElement> = weak.iter().collect();
+        assert!(
+            best_match(&weak_refs, "Seleccionar Teatro Todos los teatros", score).is_none(),
+            "0.1 is not close enough to click"
+        );
+        let none: Vec<&ObservedElement> = Vec::new();
+        assert!(best_match(&none, "anything", score).is_none(), "no candidates, no pick");
     }
 
     /// Scripted Jev stand-in: types every supplied field it is offered, then
