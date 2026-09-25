@@ -8,6 +8,7 @@ mod qa;
 mod cdp;
 mod move_cmd;
 mod episodes;
+mod affordance;
 mod learn;
 mod text_helper;
 
