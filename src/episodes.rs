@@ -253,7 +253,7 @@ pub fn summary(dir: Option<&Path>, host: Option<&str>) -> Result<serde_json::Val
     let mut reward_sum = 0.0;
     let mut judge_sum = 0.0;
     let mut elapsed_sum = 0.0;
-    let mut actions: Vec<(String, Option<String>, String, u64, f64)> = Vec::new();
+    let mut actions: Vec<(String, Option<String>, String, u64, f64, f64)> = Vec::new();
     for ep in &episodes {
         if ep.ok {
             ok_count += 1;
@@ -261,7 +261,7 @@ pub fn summary(dir: Option<&Path>, host: Option<&str>) -> Result<serde_json::Val
         reward_sum += ep.final_reward();
         judge_sum += ep.judge_calls as f64;
         elapsed_sum += ep.elapsed_ms as f64;
-        for step in &ep.steps {
+        for (step, ret) in ep.steps.iter().zip(discounted_returns(ep, GAMMA)) {
             match actions
                 .iter_mut()
                 .find(|a| a.0 == step.page_sig && a.1 == step.target && a.2 == step.operation)
@@ -269,20 +269,29 @@ pub fn summary(dir: Option<&Path>, host: Option<&str>) -> Result<serde_json::Val
                 Some(a) => {
                     a.3 += 1;
                     a.4 += step.reward;
+                    a.5 += ret;
                 }
-                None => actions.push((step.page_sig.clone(), step.target.clone(), step.operation.clone(), 1, step.reward)),
+                None => actions.push((
+                    step.page_sig.clone(),
+                    step.target.clone(),
+                    step.operation.clone(),
+                    1,
+                    step.reward,
+                    ret,
+                )),
             }
         }
     }
     let mut rows: Vec<serde_json::Value> = actions
         .iter()
-        .map(|(page_sig, target, operation, count, sum)| {
+        .map(|(page_sig, target, operation, count, reward_sum, return_sum)| {
             serde_json::json!({
                 "page_sig": page_sig,
                 "target": target,
                 "operation": operation,
                 "n": count,
-                "mean_reward": sum / *count as f64,
+                "mean_reward": reward_sum / *count as f64,
+                "mean_return": return_sum / *count as f64,
             })
         })
         .collect();
@@ -451,16 +460,35 @@ fn write_atomic(path: &Path, bytes: &[u8]) -> Result<(), String> {
 }
 
 
-// ---- RL phase 2 (plans/005-action-value-priors.md). STUB: worker p2-core implements. ----
+// ---- RL phase 2 (plans/005-action-value-priors.md). ----
 
 pub const GAMMA: f64 = 0.9;
 
+/// Reward that closes the episode: the human label wins, the run verdict is
+/// the fallback. `bad` -> -1.0, `good` -> +1.0, no label -> +1.0 when `ok`.
 pub fn terminal_reward(ep: &Episode) -> f64 {
-    0.0
+    match ep.feedback.as_ref() {
+        Some(f) if f.label.eq_ignore_ascii_case("bad") => -1.0,
+        Some(f) if f.label.eq_ignore_ascii_case("good") => 1.0,
+        _ if ep.ok => 1.0,
+        _ => -1.0,
+    }
 }
 
+/// `G_last = r'_last; G_t = r'_t + gamma * G_{t+1}`, with the terminal reward
+/// added to the last step only: credit for the run's verdict lands on the step
+/// that earned it and every earlier step keeps a discounted share of it.
 pub fn discounted_returns(ep: &Episode, gamma: f64) -> Vec<f64> {
-    vec![0.0; ep.steps.len()]
+    let mut out = vec![0.0; ep.steps.len()];
+    let terminal = terminal_reward(ep);
+    let last = ep.steps.len().saturating_sub(1);
+    let mut next = 0.0;
+    for (i, step) in ep.steps.iter().enumerate().rev() {
+        let reward = if i == last { step.reward + terminal } else { step.reward };
+        next = reward + gamma * next;
+        out[i] = next;
+    }
+    out
 }
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq)]
@@ -474,22 +502,118 @@ pub struct Prior {
 
 #[derive(Clone, Debug, Default)]
 pub struct PriorTable {
+    /// One row per `(page_sig, operation, target)`, in first-seen order. The
+    /// signature is private: callers ask for a page, not for raw keys.
     rows: Vec<(String, Prior)>,
 }
 
 impl PriorTable {
+    /// Reads `<root>/<host>.jsonl` (the stem rule `append` writes, so a `www.`
+    /// host argument still finds its file). Never fails: a missing folder, an
+    /// unreadable file or a corrupt line yields the rows that could be read.
     pub fn load(dir: Option<&Path>, host: &str) -> PriorTable {
-        PriorTable::default()
+        let path = root_dir(dir).join(format!("{}.jsonl", file_stem_for(&host_of(host))));
+        let text = match std::fs::read_to_string(&path) {
+            Ok(text) => text,
+            Err(_) => return PriorTable::default(),
+        };
+        let eps: Vec<Episode> = text
+            .lines()
+            .filter_map(|line| serde_json::from_str::<Episode>(line.trim()).ok())
+            .collect();
+        PriorTable::from_episodes(&eps)
     }
+
+    /// Aggregates the discounted return of every step of every episode by
+    /// `(page_sig, operation, target)`: `n` tries and their mean return.
     pub fn from_episodes(eps: &[Episode]) -> PriorTable {
-        PriorTable::default()
+        let mut table = PriorTable::default();
+        for ep in eps {
+            for (step, ret) in ep.steps.iter().zip(discounted_returns(ep, GAMMA)) {
+                table.add(&step.page_sig, &step.operation, step.target.as_deref(), ret);
+            }
+        }
+        table
     }
+
     pub fn is_empty(&self) -> bool {
         self.rows.is_empty()
     }
+
+    /// Actions taken on this page, best first. Exact signature hits win; when
+    /// there are none, rows are matched on the path part alone (`<host><path>`,
+    /// before the `#`) and merged — the hash moves when a drop-down opens, the
+    /// path does not. `top` caps the list, except that every known-bad row
+    /// (mean_return < -0.2) is kept: avoiding a wasted click is the point.
     pub fn for_page(&self, page_sig: &str, top: usize) -> Vec<Prior> {
-        Vec::new()
+        let mut rows: Vec<Prior> = self
+            .rows
+            .iter()
+            .filter(|(sig, _)| sig == page_sig)
+            .map(|(_, prior)| Prior { exact: true, ..prior.clone() })
+            .collect();
+        if rows.is_empty() {
+            let path = path_part(page_sig);
+            for (_, prior) in self.rows.iter().filter(|(sig, _)| path_part(sig) == path) {
+                let prior = Prior { exact: false, ..prior.clone() };
+                match rows.iter_mut().find(|r| r.operation == prior.operation && r.target == prior.target) {
+                    Some(seen) => {
+                        let n = seen.n.saturating_add(prior.n);
+                        if n > 0 {
+                            let weighted = seen.mean_return * seen.n as f64 + prior.mean_return * prior.n as f64;
+                            seen.mean_return = weighted / n as f64;
+                        }
+                        seen.n = n;
+                    }
+                    None => rows.push(prior),
+                }
+            }
+        }
+        rows.sort_by(|a, b| {
+            b.mean_return
+                .total_cmp(&a.mean_return)
+                .then(b.n.cmp(&a.n))
+                .then(a.operation.cmp(&b.operation))
+                .then(a.target.cmp(&b.target))
+        });
+        let mut out = Vec::with_capacity(rows.len().min(top) + 1);
+        for (i, row) in rows.into_iter().enumerate() {
+            if i < top || row.mean_return < -0.2 {
+                out.push(row);
+            }
+        }
+        out
     }
+
+    /// Running mean per key: `mean += (x - mean) / n`, so the table is built in
+    /// one pass without keeping the returns.
+    fn add(&mut self, page_sig: &str, operation: &str, target: Option<&str>, ret: f64) {
+        let existing = self
+            .rows
+            .iter_mut()
+            .find(|(sig, prior)| sig == page_sig && prior.operation == operation && prior.target.as_deref() == target);
+        match existing {
+            Some((_, prior)) => {
+                prior.n = prior.n.saturating_add(1);
+                prior.mean_return += (ret - prior.mean_return) / prior.n as f64;
+            }
+            None => self.rows.push((
+                page_sig.to_string(),
+                Prior {
+                    operation: operation.to_string(),
+                    target: target.map(str::to_string),
+                    n: 1,
+                    mean_return: ret,
+                    exact: true,
+                },
+            )),
+        }
+    }
+}
+
+/// `<host><path>#<hash8>` -> `<host><path>`.
+fn path_part(page_sig: &str) -> &str {
+    page_sig.split_once('#').map(|(path, _)| path).unwrap_or(page_sig)
 }
 
 #[cfg(test)]
@@ -522,6 +646,25 @@ mod tests {
             goal_met,
             ms: 100,
         }
+    }
+
+    fn sample(page_sig: &str, operation: &str, target: &str, reward: f64) -> StepSample {
+        StepSample {
+            operation: operation.into(),
+            target: Some(target.into()),
+            page_sig: page_sig.into(),
+            reward,
+            ..Default::default()
+        }
+    }
+
+    fn episode_of(ok: bool, steps: Vec<StepSample>) -> Episode {
+        Episode { ok, steps, ..Default::default() }
+    }
+
+    fn labeled(mut ep: Episode, label: &str) -> Episode {
+        ep.feedback = Some(Feedback { label: label.into(), reason: None, ts_ms: 1 });
+        ep
     }
 
     /// The contract's transform strips digits only, so the two runs must differ
@@ -774,6 +917,13 @@ mod tests {
         assert_eq!(typed["n"], 1);
         assert!((typed["mean_reward"].as_f64().unwrap() + 0.05).abs() < 1e-9);
 
+        // mean_return is the discounted G_t: the ok run's Book click closes at
+        // -0.05 + 1.0 = 0.95, its Search click carries 0.9 * 0.95 back with it,
+        // and the labeled-bad run's Search click carries the -1.0 terminal.
+        assert!((book["mean_return"].as_f64().unwrap() - 0.95).abs() < 1e-9, "{book}");
+        assert!((search_click["mean_return"].as_f64().unwrap() - 0.005).abs() < 1e-9, "{search_click}");
+        assert!((typed["mean_return"].as_f64().unwrap() + 1.05).abs() < 1e-9, "{typed}");
+
         assert_eq!(actions[0]["target"], "Search", "the best action is first");
         assert_eq!(actions[0]["operation"], "CLICK");
         let means: Vec<f64> = actions.iter().map(|a| a["mean_reward"].as_f64().unwrap()).collect();
@@ -801,6 +951,136 @@ mod tests {
         let empty = summary(Some(&dir.join("nothing-here")), None).unwrap();
         assert_eq!(empty["episodes"], 0);
         assert_eq!(empty["corrupt_lines"], 0);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn terminal_reward_covers_both_labels_and_both_verdicts() {
+        assert_eq!(terminal_reward(&episode_of(true, vec![])), 1.0, "no label: the run verdict decides");
+        assert_eq!(terminal_reward(&episode_of(false, vec![])), -1.0);
+        assert_eq!(terminal_reward(&labeled(episode_of(false, vec![]), "good")), 1.0, "a human 'good' outranks the failed verdict");
+        assert_eq!(terminal_reward(&labeled(episode_of(true, vec![]), "bad")), -1.0, "a human 'bad' outranks the ok verdict");
+        assert_eq!(terminal_reward(&labeled(episode_of(true, vec![]), "BAD")), -1.0, "the label is case-insensitive");
+    }
+
+    #[test]
+    fn discounted_returns_discount_backwards_from_the_terminal_reward() {
+        let ep = episode_of(true, vec![
+            sample("example.com/#aaaa", "CLICK", "A", 0.1),
+            sample("example.com/#aaaa", "CLICK", "B", 0.2),
+            sample("example.com/#aaaa", "CLICK", "C", 0.3),
+        ]);
+        // Terminal +1.0 lands on the last step only: G2 = 0.3 + 1.0, G1 = 0.2 + 0.9 * G2, G0 = 0.1 + 0.9 * G1.
+        let one = discounted_returns(&ep, 1.0);
+        assert!((one[2] - 1.3).abs() < 1e-9, "{one:?}");
+        assert!((one[1] - 1.5).abs() < 1e-9, "{one:?}");
+        assert!((one[0] - 1.6).abs() < 1e-9, "{one:?}");
+
+        let gamma = discounted_returns(&ep, GAMMA);
+        assert!((gamma[2] - 1.3).abs() < 1e-9, "{gamma:?}");
+        assert!((gamma[1] - 1.37).abs() < 1e-9, "{gamma:?}");
+        assert!((gamma[0] - 1.333).abs() < 1e-9, "{gamma:?}");
+
+        assert!(discounted_returns(&episode_of(true, vec![]), GAMMA).is_empty(), "no steps, no returns");
+    }
+
+    #[test]
+    fn a_bad_label_lowers_every_earlier_return() {
+        let steps = vec![
+            sample("example.com/#aaaa", "CLICK", "Search", 0.45),
+            sample("example.com/booking#bbbb", "CLICK", "Book", 0.45),
+        ];
+        let unlabeled = discounted_returns(&episode_of(true, steps.clone()), GAMMA);
+        let bad = discounted_returns(&labeled(episode_of(true, steps), "bad"), GAMMA);
+        assert!(
+            bad.iter().zip(&unlabeled).all(|(b, u)| *b < *u),
+            "the -1.0 terminal reaches the early step: bad {bad:?} vs unlabeled {unlabeled:?}"
+        );
+        assert!(bad[1] < 0.0, "the labeled-bad run's last step sits below the -1.0 terminal: {bad:?}");
+    }
+
+    #[test]
+    fn for_page_prefers_exact_signatures_over_the_path_fallback() {
+        let table = PriorTable::from_episodes(&[
+            episode_of(true, vec![sample("example.com/showtimes#aaaa", "CLICK", "Showtimes", 0.45)]),
+            episode_of(false, vec![sample("example.com/showtimes#bbbb", "CLICK", "Close", -0.05)]),
+        ]);
+        assert!(!table.is_empty());
+
+        let exact = table.for_page("example.com/showtimes#aaaa", 12);
+        assert_eq!(exact.len(), 1, "only the same hash is an exact hit: {exact:?}");
+        assert_eq!(exact[0].target.as_deref(), Some("Showtimes"));
+        assert!(exact[0].exact);
+        assert_eq!(exact[0].n, 1);
+        assert!((exact[0].mean_return - 1.45).abs() < 1e-9, "0.45 + the 1.0 terminal: {exact:?}");
+
+        let fallback = table.for_page("example.com/showtimes#cccc", 12);
+        assert_eq!(fallback.len(), 2, "a different hash falls back to the path part: {fallback:?}");
+        assert!(fallback.iter().all(|p| !p.exact), "fallback rows are marked inexact: {fallback:?}");
+        assert_eq!(fallback[0].target.as_deref(), Some("Showtimes"), "best first: {fallback:?}");
+
+        assert!(table.for_page("example.com/other#aaaa", 12).is_empty(), "another path never matches");
+    }
+
+    #[test]
+    fn fallback_merges_the_same_action_with_a_weighted_mean() {
+        let table = PriorTable::from_episodes(&[
+            episode_of(true, vec![
+                sample("example.com/showtimes#aaaa", "CLICK", "Showtimes", 0.45),
+                sample("example.com/showtimes#aaaa", "CLICK", "Showtimes", 0.45),
+            ]),
+            labeled(episode_of(false, vec![sample("example.com/showtimes#bbbb", "CLICK", "Showtimes", -0.05)]), "bad"),
+        ]);
+        let rows = table.for_page("example.com/showtimes#cccc", 12);
+        assert_eq!(rows.len(), 1, "one (operation, target) across both hashes: {rows:?}");
+        assert_eq!(rows[0].n, 3, "n sums across the merged rows");
+        // Run 1: G1 = 0.45 + 1.0 = 1.45 (last step, undiscounted), G0 = 0.45 + 0.9 * 1.45 = 1.755.
+        // Run 2, labeled bad: G0 = -0.05 - 1.0 = -1.05.
+        let want = (1.755 + 1.45 - 1.05) / 3.0;
+        assert!((rows[0].mean_return - want).abs() < 1e-9, "weighted mean: {rows:?}");
+        assert!(!rows[0].exact);
+    }
+
+    #[test]
+    fn a_known_bad_row_survives_the_top_cut() {
+        let table = PriorTable::from_episodes(&[
+            episode_of(true, vec![sample("example.com/#aaaa", "CLICK", "A", 0.9)]),
+            episode_of(true, vec![sample("example.com/#aaaa", "CLICK", "B", 0.5)]),
+            labeled(episode_of(false, vec![sample("example.com/#aaaa", "CLICK", "Close", -0.05)]), "bad"),
+        ]);
+        let top_one = table.for_page("example.com/#aaaa", 1);
+        assert_eq!(top_one.len(), 2, "only the known-bad row is added past the cut: {top_one:?}");
+        assert_eq!(top_one[0].target.as_deref(), Some("A"));
+        assert_eq!(top_one[1].target.as_deref(), Some("Close"));
+        assert!(top_one[1].mean_return < -0.2, "the surplus row is a known-bad one: {top_one:?}");
+        assert_eq!(table.for_page("example.com/#aaaa", 0).len(), 1, "top 0 keeps nothing but known-bad rows");
+        assert_eq!(table.for_page("example.com/#aaaa", 12).len(), 3, "within the cap nothing is dropped");
+
+        let means: Vec<f64> = table.for_page("example.com/#aaaa", 12).iter().map(|p| p.mean_return).collect();
+        assert!(means.windows(2).all(|w| w[0] >= w[1]), "sorted by mean_return desc: {means:?}");
+    }
+
+    #[test]
+    fn load_reads_the_host_file_and_a_missing_one_is_empty() {
+        let dir = tmp_dir("prior-load");
+        let missing = PriorTable::load(Some(&dir), "nope.test");
+        assert!(missing.is_empty());
+        assert!(missing.for_page("nope.test/#aaaa", 12).is_empty());
+
+        assert!(PriorTable::load(Some(&dir.join("nothing-here")), "example.com").is_empty(), "no folder, no rows");
+
+        let mut ep = episode_of(true, vec![sample("example.com/showtimes#aaaa", "CLICK", "Showtimes", 0.45)]);
+        ep.host = "example.com".into();
+        append(Some(&dir), &ep).unwrap();
+        assert!(dir.join("example.com.jsonl").is_file(), "append writes <host>.jsonl");
+        let loaded = PriorTable::load(Some(&dir), "www.example.com");
+        assert!(!loaded.is_empty(), "a www. host argument still reaches example.com.jsonl");
+        let rows = loaded.for_page("example.com/showtimes#aaaa", 12);
+        assert_eq!(rows.len(), 1, "{rows:?}");
+        assert_eq!(rows[0].target.as_deref(), Some("Showtimes"));
+        assert_eq!(rows[0].n, 1);
+        assert!(rows[0].exact);
+        assert!((rows[0].mean_return - 1.45).abs() < 1e-9, "{rows:?}");
         let _ = std::fs::remove_dir_all(&dir);
     }
 }
