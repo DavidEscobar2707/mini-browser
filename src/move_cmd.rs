@@ -234,10 +234,23 @@ fn await_first_page(cdp: &mut Cdp) {
     }
 }
 
-fn attach() -> Result<Cdp, String> {
-    if crate::debug::status_code_quiet() != 0 {
-        return Err("debug browser is not up; start it with `mini --debug` (see `mini --debug-status`)".into());
+const LAUNCH_TIMEOUT_MS: u64 = 20_000;
+
+/// Reuses a running debug browser, else starts one. Returns whether it launched.
+fn ensure_browser(is_up: impl Fn() -> bool, launch: impl FnOnce() -> Result<(), String>) -> Result<bool, String> {
+    if is_up() {
+        return Ok(false);
     }
+    launch().map_err(|e| format!("debug browser was not up and auto-launch failed: {e}"))?;
+    Ok(true)
+}
+
+/// `start_url`: where a freshly launched browser opens; ignored when one is up.
+fn attach(start_url: Option<&str>) -> Result<Cdp, String> {
+    ensure_browser(
+        || crate::debug::status_code_quiet() == 0,
+        || crate::debug::launch_detached(start_url, LAUNCH_TIMEOUT_MS),
+    )?;
     let port = crate::debug::recorded_port().unwrap_or_else(crate::debug::port);
     let ws = crate::cdp::page_ws_url(port)?;
     let mut cdp = Cdp::connect(&ws)?;
@@ -1486,18 +1499,25 @@ pub fn run(args: &[String], index: usize) -> i32 {
         );
     };
     let model = crate::qa::jev::model();
-    let mut cdp = match attach() {
+    // Resolve and gate --url before attach so a refused URL never launches a window.
+    let resolved = match &a.url {
+        Some(url) => {
+            let Some(resolved) = crate::omnibox::resolve(url) else { return fail("move", &format!("cannot open {url}")) };
+            if !a.allow_remote && !is_loopback_host(&resolved) {
+                return fail(
+                    "move",
+                    &format!("{} is not loopback; pass --allow-remote to drive other sites", firewall::host_only(&resolved)),
+                );
+            }
+            Some(resolved)
+        }
+        None => None,
+    };
+    let mut cdp = match attach(resolved.as_deref()) {
         Ok(c) => c,
         Err(e) => return fail("move", &e),
     };
-    if let Some(url) = &a.url {
-        let Some(resolved) = crate::omnibox::resolve(url) else { return fail("move", &format!("cannot open {url}")) };
-        if !a.allow_remote && !is_loopback_host(&resolved) {
-            return fail(
-                "move",
-                &format!("{} is not loopback; pass --allow-remote to drive other sites", firewall::host_only(&resolved)),
-            );
-        }
+    if let Some(resolved) = &resolved {
         if let Err(e) = cdp.navigate(&resolved).and_then(|_| cdp.wait_for_load(Duration::from_secs(20))) {
             // A heavy page (homecenter) renders its search box long before
             // `complete`; failing the run there threw away a usable page.
@@ -1698,7 +1718,7 @@ pub fn episodes_cmd(args: &[String], index: usize) -> i32 {
 /// No Jev call. `--observe` sends only the visible text (what Jev needs);
 /// this is for the caller that wants to read the result.
 pub fn read() -> i32 {
-    let mut cdp = match attach() {
+    let mut cdp = match attach(None) {
         Ok(c) => c,
         Err(e) => {
             eprintln!("mini --read: {e}");
@@ -1715,7 +1735,7 @@ pub fn read() -> i32 {
 /// `mini --observe`: the indexed element table for the live page, as JSON.
 /// No Jev call. Lets an agent read the page cheaply before deciding a goal.
 pub fn observe() -> i32 {
-    let mut cdp = match attach() {
+    let mut cdp = match attach(None) {
         Ok(c) => c,
         Err(e) => {
             eprintln!("mini --observe: {e}");
@@ -1753,6 +1773,23 @@ mod tests {
 
     fn args(items: &[&str]) -> Vec<String> {
         items.iter().map(|s| s.to_string()).collect()
+    }
+
+    #[test]
+    fn ensure_browser_reuses_when_up_and_launches_when_down() {
+        let launched = std::cell::Cell::new(0);
+        let launch = || {
+            launched.set(launched.get() + 1);
+            Ok(())
+        };
+        assert_eq!(ensure_browser(|| true, launch), Ok(false));
+        assert_eq!(launched.get(), 0);
+        assert_eq!(ensure_browser(|| false, launch), Ok(true));
+        assert_eq!(launched.get(), 1);
+        assert_eq!(
+            ensure_browser(|| false, || Err("timeout".to_string())),
+            Err("debug browser was not up and auto-launch failed: timeout".to_string())
+        );
     }
 
     #[test]
@@ -2298,7 +2335,7 @@ mod tests {
     #[test]
     #[ignore]
     fn live_move_signs_in_through_the_right_form() {
-        let mut cdp = attach().expect("debug browser up");
+        let mut cdp = attach(None).expect("debug browser up");
         cdp.navigate("http://127.0.0.1:8000/login.html").unwrap();
         cdp.wait_for_load(Duration::from_secs(10)).unwrap();
         let judge = ScriptedJudge { submit: "Sign in", done_text: "You are signed in", calls: Default::default() };

@@ -192,6 +192,32 @@ pub fn spawn_detached_child(args: &[String]) -> Result<std::process::Child, i32>
     }
 }
 
+/// Starts the interactive `--debug` browser detached (same spawn and
+/// readiness wait as `mini --debug`) and blocks until it publishes `ready`.
+/// `url` = start page; `None` opens Mini's start page.
+pub fn launch_detached(url: Option<&str>, timeout_ms: u64) -> Result<(), String> {
+    let mut args = vec!["mini".to_string(), "--debug".to_string()];
+    args.extend(url.map(str::to_string));
+    // CreateProcess inherits every inheritable handle, so without this the
+    // long-lived browser keeps the caller's stdout/stderr pipe open and a
+    // shell capturing `mini --move` output never sees EOF.
+    {
+        use std::os::windows::io::AsRawHandle;
+        use windows::Win32::Foundation::{SetHandleInformation, HANDLE, HANDLE_FLAGS, HANDLE_FLAG_INHERIT};
+        for h in [std::io::stdin().as_raw_handle(), std::io::stdout().as_raw_handle(), std::io::stderr().as_raw_handle()] {
+            unsafe {
+                let _ = SetHandleInformation(HANDLE(h), HANDLE_FLAG_INHERIT.0, HANDLE_FLAGS(0));
+            }
+        }
+    }
+    let mut child = spawn_detached_child(&args).map_err(|_| "could not start the debug browser".to_string())?;
+    if await_child_ready(child.id(), timeout_ms).is_some() {
+        return Ok(());
+    }
+    let _ = child.kill();
+    Err(format!("debug browser did not open 127.0.0.1:{} within {}s", port(), timeout_ms / 1000))
+}
+
 struct RunWriters {
     dir: PathBuf,
     index: u32,
