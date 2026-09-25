@@ -207,11 +207,60 @@ fn read_stdin_json() -> Option<String> {
     trimmed.starts_with('{').then(|| trimmed.to_string())
 }
 
+/// The browser the run drives. `Cdp` is the live one; the loop's own tests
+/// script a fake page, so its ordering (the search recovery before the disputed
+/// DONE, the bar a page's goal check must clear) is covered without a window.
+trait Page {
+    fn eval(&mut self, js: &str) -> Result<String, String>;
+    fn eval_within(&mut self, js: &str, timeout: Duration) -> Result<String, String>;
+    fn navigate(&mut self, url: &str) -> Result<(), String>;
+    fn wait_for_load(&mut self, timeout: Duration) -> Result<(), String>;
+    fn mouse_click(&mut self, x: f64, y: f64) -> Result<(), String>;
+    fn wheel(&mut self, x: f64, y: f64, delta_y: f64) -> Result<(), String>;
+    fn press_enter(&mut self) -> Result<(), String>;
+    fn key_text(&mut self, text: &str) -> Result<(), String>;
+    fn select_all(&mut self) -> Result<(), String>;
+    fn reconnect(&mut self) -> Result<(), String>;
+}
+
+impl Page for Cdp {
+    fn eval(&mut self, js: &str) -> Result<String, String> {
+        Cdp::eval(self, js)
+    }
+    fn eval_within(&mut self, js: &str, timeout: Duration) -> Result<String, String> {
+        Cdp::eval_within(self, js, timeout)
+    }
+    fn navigate(&mut self, url: &str) -> Result<(), String> {
+        Cdp::navigate(self, url)
+    }
+    fn wait_for_load(&mut self, timeout: Duration) -> Result<(), String> {
+        Cdp::wait_for_load(self, timeout)
+    }
+    fn mouse_click(&mut self, x: f64, y: f64) -> Result<(), String> {
+        Cdp::mouse_click(self, x, y)
+    }
+    fn wheel(&mut self, x: f64, y: f64, delta_y: f64) -> Result<(), String> {
+        Cdp::wheel(self, x, y, delta_y)
+    }
+    fn press_enter(&mut self) -> Result<(), String> {
+        Cdp::press_enter(self)
+    }
+    fn key_text(&mut self, text: &str) -> Result<(), String> {
+        Cdp::key_text(self, text)
+    }
+    fn select_all(&mut self) -> Result<(), String> {
+        Cdp::select_all(self)
+    }
+    fn reconnect(&mut self) -> Result<(), String> {
+        Cdp::reconnect(self)
+    }
+}
+
 /// Opt-in for password fields in the snapshot (values are never read).
 const MOVE_PRELUDE: &str =
     "(() => { const q = (window.__miniQA = window.__miniQA || {}); q.__allowSecretFields = true; q.__onlyReachable = true; })();";
 
-fn inject(cdp: &mut Cdp) -> Result<(), String> {
+fn inject(cdp: &mut dyn Page) -> Result<(), String> {
     cdp.eval(MOVE_PRELUDE)?;
     for script in crate::qa::PAGE_SCRIPTS {
         cdp.eval(script)?;
@@ -250,7 +299,7 @@ fn attach() -> Result<Cdp, String> {
     Ok(cdp)
 }
 
-fn ensure_helpers(cdp: &mut Cdp) -> Result<(), String> {
+fn ensure_helpers(cdp: &mut dyn Page) -> Result<(), String> {
     let present = cdp.eval_within(
         "typeof window.__miniQA === 'object' && typeof window.__miniQA.snapshot === 'function'",
         EVAL_TIMEOUT,
@@ -264,7 +313,7 @@ fn ensure_helpers(cdp: &mut Cdp) -> Result<(), String> {
 /// One observation. Like jev-ultrafast's `observe`, a page that is navigating
 /// or not answering is stale, not fatal: reconnect if the reply was lost,
 /// wait briefly, observe again.
-fn snapshot(cdp: &mut Cdp) -> Result<Observation, String> {
+fn snapshot(cdp: &mut dyn Page) -> Result<Observation, String> {
     let deadline = Instant::now() + OBSERVE_BUDGET;
     let mut last = String::new();
     while Instant::now() < deadline {
@@ -282,7 +331,7 @@ fn snapshot(cdp: &mut Cdp) -> Result<Observation, String> {
     Err(format!("page did not become observable within {}s: {last}", OBSERVE_BUDGET.as_secs()))
 }
 
-fn observe_once(cdp: &mut Cdp) -> Result<Observation, String> {
+fn observe_once(cdp: &mut dyn Page) -> Result<Observation, String> {
     let ready = cdp.eval_within("document.readyState", EVAL_TIMEOUT)?;
     if ready.trim_matches('"') == "loading" {
         return Err("document is loading".into());
@@ -293,7 +342,7 @@ fn observe_once(cdp: &mut Cdp) -> Result<Observation, String> {
 
 /// jev-ultrafast's post-input wait: two animation frames or 50 ms; after
 /// typing into an editable combobox, up to 200 ms for visible options.
-fn after_input(cdp: &mut Cdp, typed_combobox: bool) {
+fn after_input(cdp: &mut dyn Page, typed_combobox: bool) {
     let js = format!(
         "new Promise(resolve => {{ const combo = {typed_combobox}; let frames = 0, stopped = false; \
          const finish = () => {{ stopped = true; resolve(true); }}; setTimeout(finish, combo ? 200 : 50); \
@@ -354,30 +403,68 @@ for a list, or a page for a different place, date, or subject than the goal name
 
 /// Above this, the page counts as meeting the goal on its own (no DONE needed).
 const GOAL_MET_AT: f64 = 0.7;
-/// Jev's DONE is accepted only with evidence: the same-request goal check must
-/// say the page holds the answer. The benchmark's one false `ok` was a DONE
-/// taken on a page whose own check scored 0.03. Below this the claim is
-/// disputed like any unsupported DONE — three of them end the run as a
-/// failure, never as `ok`.
-const DONE_EVIDENCE_AT: f64 = 0.5;
+/// What a search goal needs while it is still on the page it started on. A home
+/// page that merely *has* a search box scores like the search it asks for
+/// (ktronix: 0.72 on the unchanged home page, with no search ever submitted),
+/// so a search that never left its start page needs near-certainty.
+const SEARCH_ON_START_AT: f64 = 0.9;
 
-/// Whether Jev's DONE is supported by the page it was claimed on.
-pub fn done_has_evidence(goal_met: Option<f64>) -> bool {
-    goal_met.is_some_and(|p| p >= DONE_EVIDENCE_AT)
+/// A URL without its fragment: the hash moves when a menu opens, the page it
+/// names does not.
+pub fn without_fragment(url: &str) -> &str {
+    url.split('#').next().unwrap_or(url)
+}
+
+/// The probability the goal check needs on `url` before the run may call itself
+/// ok there: the bar for *this* page, not one number for every page. A search
+/// goal still on its start URL is the case that scores high without the search
+/// having run.
+pub fn goal_threshold(goal: &str, start_url: &str, url: &str) -> f64 {
+    if affordance::goal_wants_search(goal) && without_fragment(url) == without_fragment(start_url) {
+        SEARCH_ON_START_AT
+    } else {
+        GOAL_MET_AT
+    }
+}
+
+/// Whether the same-request goal check backs up a claim about the current page.
+/// One gate for every `ok`: Jev's DONE and the run's own verdict need the same
+/// evidence, so no DONE can end a run on a page whose own check scored below
+/// the bar that page needed. Both benchmark false `ok`s were exactly that — a
+/// DONE taken on a page its own check scored 0.03, and a DONE accepted at 0.5+
+/// right after a disputed DONE on a page that never changed.
+pub fn done_has_evidence(goal_met: Option<f64>, needed: f64) -> bool {
+    goal_met.is_some_and(|p| p >= needed)
 }
 
 /// Whether Mini should open the real search field itself instead of taking
-/// Jev's terminal answer: Jev either gave up (BLOCKED) or claimed DONE with no
-/// evidence the goal is on the page. A page the goal check already passed is
-/// left alone — the recovery must not walk away from the answer. On Éxito and
-/// Ktronix the search box is a click-only textbox: the click is what opens the
-/// field that can be typed into. The caller checks the goal wants a search,
-/// and that such a control is still untried.
-pub fn search_recovery_wanted(operation: &str, goal_met: Option<f64>) -> bool {
-    if goal_met.is_some_and(|p| p >= GOAL_MET_AT) {
-        return false;
+/// Jev's terminal answer: Jev either gave up (BLOCKED) or claimed DONE the
+/// page's own check does not back up. On Éxito and Ktronix the search box is a
+/// click-only textbox — the click is what opens the field that can be typed
+/// into. An evidenced DONE never reaches this (the goal-check path ends the run
+/// on it first); BLOCKED always does, however well the page scored, because a
+/// BLOCKED answer never ends a run as ok. The caller checks the goal wants a
+/// search and that such a control is still untried.
+pub fn search_recovery_wanted(operation: &str, goal_met: Option<f64>, needed: f64) -> bool {
+    match operation {
+        "BLOCKED" => true,
+        "DONE" => !done_has_evidence(goal_met, needed),
+        _ => false,
     }
-    matches!(operation, "BLOCKED" | "DONE")
+}
+
+/// A search-like text field the run never typed into: the page does offer a way
+/// to search, and Jev answered as if it did not (Éxito's `fill` "search"). Naming
+/// it in history is worth one retry.
+fn unused_search_field<'a>(candidates: &'a [ObservedElement], history: &[StepRecord]) -> Option<&'a ObservedElement> {
+    candidates
+        .iter()
+        .find(|el| el.kind == "fill" && affordance::is_search_like(el))
+        .filter(|el| {
+            !history
+                .iter()
+                .any(|h| h.operation == "TYPE_TEXT" && h.target_label.as_deref() == Some(el.label.as_str()))
+        })
 }
 
 fn add_goal_check(question: &mut Value, goal: &str) {
@@ -455,7 +542,7 @@ fn node_alive_probe(node: u64) -> String {
 
 /// Executes one decided step; `typed` is the resolved TYPE_TEXT value.
 /// Returns a note when the step was refused rather than executed.
-fn perform(cdp: &mut Cdp, d: &Decision, typed: Option<&str>, typing: &mut Typing) -> Result<Option<String>, String> {
+fn perform(cdp: &mut dyn Page, d: &Decision, typed: Option<&str>, typing: &mut Typing) -> Result<Option<String>, String> {
     let id = d.target.as_ref().map(|t| json!(t.id).to_string());
     match d.operation.as_str() {
         "CLICK" => {
@@ -739,7 +826,7 @@ fn auto_scroll_step(before: &Observation, after: &Observation, ms: u64) -> MoveS
     }
 }
 
-fn full_text(cdp: &mut Cdp) -> String {
+fn full_text(cdp: &mut dyn Page) -> String {
     cdp.eval_within("document.body ? document.body.innerText : ''", EVAL_TIMEOUT)
         .ok()
         .and_then(|raw| serde_json::from_str::<String>(&raw).ok())
@@ -747,14 +834,14 @@ fn full_text(cdp: &mut Cdp) -> String {
 }
 
 /// Loads lazy content by scrolling through the page once.
-fn load_whole_page(cdp: &mut Cdp) {
+fn load_whole_page(cdp: &mut dyn Page) {
     let _ = cdp.eval_within(SCROLL_THROUGH, Duration::from_secs(15));
 }
 
 /// Loads lazy content on the page the run is stuck on (`BLOCKED`, or steps
 /// that changed nothing) and records it: the same automatic load as a first
 /// visit, so it is not an action and never reaches Jev.
-fn recovery_scroll(cdp: &mut Cdp, steps: &mut Vec<MoveStep>, before: &Observation) {
+fn recovery_scroll(cdp: &mut dyn Page, steps: &mut Vec<MoveStep>, before: &Observation) {
     let started = Instant::now();
     load_whole_page(cdp);
     if let Ok(after) = snapshot(cdp) {
@@ -773,7 +860,7 @@ fn recovery_scroll(cdp: &mut Cdp, steps: &mut Vec<MoveStep>, before: &Observatio
 /// scrolling, so the bounce would buy nothing. The scroll-through itself comes
 /// back as the report's AUTO_SCROLL step.
 fn loaded_snapshot(
-    cdp: &mut Cdp,
+    cdp: &mut dyn Page,
     loaded: &mut std::collections::HashSet<String>,
 ) -> Result<(Observation, Option<MoveStep>), String> {
     let before = snapshot(cdp)?;
@@ -799,7 +886,7 @@ const PAGE_SETTLE_LIMIT: Duration = Duration::from_secs(5);
 /// sections and the "Cargando…" placeholders that stand in for them settle a
 /// beat later, so two reads `PAGE_SETTLE` apart with the same length are taken
 /// as final. A page that never settles still produces a report (5 s cap).
-fn settled_page_text(cdp: &mut Cdp) -> String {
+fn settled_page_text(cdp: &mut dyn Page) -> String {
     let deadline = Instant::now() + PAGE_SETTLE_LIMIT;
     let mut last = full_text(cdp);
     loop {
@@ -961,7 +1048,7 @@ fn replay_broke(k: usize, why: String, steps: Vec<MoveStep>) -> Replay {
 /// full replay costs exactly one Jev call. The `--allow-remote` policy applies
 /// to replay like it does to the loop.
 fn replay_route(
-    cdp: &mut Cdp,
+    cdp: &mut dyn Page,
     a: &MoveArgs,
     route: &episodes::Route,
     loaded: &mut std::collections::HashSet<String>,
@@ -1061,7 +1148,7 @@ fn replay_enabled(a: &MoveArgs) -> bool {
 /// The route this host already solved for this goal, replayed from the current
 /// page. The goal is matched normalized, so a reworded goal still finds its
 /// route.
-fn replay_for(cdp: &mut Cdp, a: &MoveArgs, url_before: &str, loaded: &mut std::collections::HashSet<String>) -> Replay {
+fn replay_for(cdp: &mut dyn Page, a: &MoveArgs, url_before: &str, loaded: &mut std::collections::HashSet<String>) -> Replay {
     if !replay_enabled(a) {
         return Replay::default();
     }
@@ -1111,7 +1198,7 @@ impl SearchOpener {
 /// any other click — with the note the operator reads in the report — and a
 /// trigger that changed nothing is retired like any other dead control.
 fn open_search(
-    cdp: &mut Cdp,
+    cdp: &mut dyn Page,
     el: &ObservedElement,
     before: &Observation,
     guard: &mut LoopGuard,
@@ -1162,7 +1249,7 @@ fn open_search(
 }
 
 /// The loop, over the I/O seams, so it can run against a fake judge in tests.
-fn run_loop(cdp: &mut Cdp, judge: &dyn Judge, helper: Option<&TextHelper>, a: &MoveArgs) -> MoveReport {
+fn run_loop(cdp: &mut dyn Page, judge: &dyn Judge, helper: Option<&TextHelper>, a: &MoveArgs) -> MoveReport {
     let started = Instant::now();
     let names: Vec<String> = a.values.keys().cloned().collect();
     let mut history: Vec<StepRecord> = Vec::new();
@@ -1170,7 +1257,7 @@ fn run_loop(cdp: &mut Cdp, judge: &dyn Judge, helper: Option<&TextHelper>, a: &M
     let mut no_change = 0usize;
     let mut ok = false;
     let mut rejected_once = false;
-    let mut stale_done = 0usize;
+    let mut stale_blocked = 0usize;
     let mut text_calls = 0u32;
     let mut last_page = Observation::default();
     let mut guard = LoopGuard::default();
@@ -1180,6 +1267,8 @@ fn run_loop(cdp: &mut Cdp, judge: &dyn Judge, helper: Option<&TextHelper>, a: &M
     // Mini's own clicks on a search control Jev cannot type into ("search_like"
     // textboxes on Éxito/Ktronix), bounded per run (plan 007 §2).
     let mut opener = SearchOpener::default();
+    // The one retry that names an unused search field in history (plan 008 §B).
+    let mut nudged = false;
     // Page most likely to meet the goal so far: (probability, URL).
     let mut best: Option<(f64, String)> = None;
     let mut done_disputed = 0usize;
@@ -1245,13 +1334,17 @@ fn run_loop(cdp: &mut Cdp, judge: &dyn Judge, helper: Option<&TextHelper>, a: &M
             }
             Err(e) => break format!("judge failed: {e}"),
         };
+        // The bar the goal check has to clear on this page before the run may
+        // call itself ok here (a search goal still on its start URL needs more).
+        let needed = goal_threshold(&a.goal, &url_before, &before.url);
         if let Some(p) = decision.goal_met {
             if best.as_ref().map_or(true, |(bp, _)| p > *bp) {
                 best = Some((p, before.url.clone()));
             }
             // The page already answers the goal: stop here rather than act on
-            // it (clicking past the answer is the common failure).
-            if p >= GOAL_MET_AT && decision.operation != "BLOCKED" {
+            // it (clicking past the answer is the common failure). A BLOCKED
+            // answer never ends a run as ok — the search recovery below owns it.
+            if decision.operation != "BLOCKED" && done_has_evidence(Some(p), needed) {
                 ok = true;
                 break format!("the goal check passed on this page (p={p:.2})");
             }
@@ -1259,9 +1352,11 @@ fn run_loop(cdp: &mut Cdp, judge: &dyn Judge, helper: Option<&TextHelper>, a: &M
         // Jev cannot type into a search box that is really a click-only
         // textbox (Éxito, Ktronix): on such a page it answers BLOCKED, or
         // claims DONE on a page that shows nothing. When the goal wants a
-        // search, Mini clicks that control itself and looks at what it opened.
+        // search, Mini clicks that control itself and looks at what it opened —
+        // before the stale check, before the disputed-DONE counter and before
+        // the reload, so a dead end costs no strike.
         if affordance::goal_wants_search(&a.goal)
-            && search_recovery_wanted(&decision.operation, decision.goal_met)
+            && search_recovery_wanted(&decision.operation, decision.goal_met, needed)
         {
             if let Some(el) = opener.next(&candidates, affordance::is_fake_search_trigger) {
                 open_search(cdp, &el, &before, &mut guard, &mut steps, &mut history);
@@ -1269,11 +1364,28 @@ fn run_loop(cdp: &mut Cdp, judge: &dyn Judge, helper: Option<&TextHelper>, a: &M
                 no_change = 0;
                 continue;
             }
+            // No fake trigger left to click: a search field Jev never typed into
+            // is worth one retry, with the field named where Jev reads it.
+            if !nudged {
+                if let Some(el) = unused_search_field(&candidates, &history) {
+                    nudged = true;
+                    let note = format!("the page has a search field: {}", el.label);
+                    history.push(StepRecord {
+                        step: steps.len(),
+                        operation: "NOTE".into(),
+                        target_label: Some(note.clone()),
+                        note: Some(note),
+                        ..Default::default()
+                    });
+                    continue;
+                }
+            }
         }
-        // Jev's DONE needs the same page's goal check to back it up: a DONE
-        // with no evidence is disputed, and three of them end the run as a
+        // Jev's DONE is only accepted by the goal-check path above, which needs
+        // the same page's check to clear this page's bar. A DONE that reaches
+        // here has no evidence: disputed, and three of them end the run as a
         // failure.
-        if decision.operation == "DONE" && !done_has_evidence(decision.goal_met) {
+        if decision.operation == "DONE" {
             done_disputed += 1;
             if done_disputed > 2 {
                 // Jev insists but its own goal check disagrees: not a success.
@@ -1298,17 +1410,13 @@ fn run_loop(cdp: &mut Cdp, judge: &dyn Judge, helper: Option<&TextHelper>, a: &M
             history.push(StepRecord { step: steps.len(), operation: "DONE".into(), note: Some(why.into()), ..Default::default() });
             continue;
         }
-        if matches!(decision.operation.as_str(), "DONE" | "BLOCKED") {
+        if decision.operation == "BLOCKED" {
             // jev-ultrafast: a terminal answer about a page that has since
             // changed is stale — observe and decide again (bounded).
             let fresh = snapshot(cdp).map(|now| !page_changed(&before, &now)).unwrap_or(true);
-            if !fresh && stale_done < 2 {
-                stale_done += 1;
+            if !fresh && stale_blocked < 2 {
+                stale_blocked += 1;
                 continue;
-            }
-            if decision.operation == "DONE" {
-                ok = true;
-                break "the judge reported the goal is done".to_string();
             }
             // Before accepting BLOCKED, load lazy content once and ask again:
             // the evidence is often further down, still "loading".
@@ -1407,7 +1515,9 @@ fn run_loop(cdp: &mut Cdp, judge: &dyn Judge, helper: Option<&TextHelper>, a: &M
     if !ok || !stop.starts_with("the goal check") {
         let here = cdp.eval("location.href").map(|s| s.trim_matches('"').to_string()).unwrap_or_default();
         if let Some((p, url)) = &best {
-            if *p >= GOAL_MET_AT && *url != here {
+            // The same bar the goal check had to clear on that page: a home
+            // page that merely has a search box is not the search's answer.
+            if done_has_evidence(Some(*p), goal_threshold(&a.goal, &url_before, url)) && *url != here {
                 if cdp.navigate(url).and_then(|_| cdp.wait_for_load(Duration::from_secs(20))).is_ok() {
                     ok = true;
                     stop = format!("returned to the page that passed the goal check (p={p:.2})");
@@ -2159,22 +2269,90 @@ mod tests {
     }
 
     #[test]
-    fn done_needs_the_goal_check_before_it_is_believed() {
-        assert!(done_has_evidence(Some(0.5)), "the threshold itself is evidence");
-        assert!(done_has_evidence(Some(0.92)));
-        assert!(!done_has_evidence(Some(0.49)), "just below the bar is a disputed DONE");
-        assert!(!done_has_evidence(Some(0.03)), "the benchmark's false ok scored 0.03");
-        assert!(!done_has_evidence(None), "no goal check at all is no evidence");
+    fn done_needs_the_goal_check_to_clear_the_bar_that_page_needed() {
+        assert!(done_has_evidence(Some(0.7), GOAL_MET_AT), "the bar itself is evidence");
+        assert!(done_has_evidence(Some(0.92), GOAL_MET_AT));
+        assert!(!done_has_evidence(Some(0.69), GOAL_MET_AT), "just below the bar is a disputed DONE");
+        assert!(!done_has_evidence(Some(0.03), GOAL_MET_AT), "the benchmark's false ok scored 0.03");
+        assert!(!done_has_evidence(None, GOAL_MET_AT), "no goal check at all is no evidence");
+        assert!(
+            !done_has_evidence(Some(0.72), SEARCH_ON_START_AT),
+            "a DONE on a start page a search never left is not evidence either"
+        );
+    }
+
+    #[test]
+    fn a_search_goal_still_on_its_start_page_needs_more_than_the_usual_bar() {
+        let goal = "Search this site for \"iphone 15\" and submit the search.";
+        let start = "https://www.ktronix.com/";
+        assert_eq!(goal_threshold(goal, start, start), SEARCH_ON_START_AT, "the home page is not the search's results");
+        assert_eq!(goal_threshold(goal, start, "https://www.ktronix.com/#/"), SEARCH_ON_START_AT, "the fragment is not the page");
+        assert_eq!(
+            goal_threshold(goal, start, "https://www.ktronix.com/search?q=iphone"),
+            GOAL_MET_AT,
+            "a submitted search is on another page"
+        );
+        assert_eq!(goal_threshold("sign in to the app", start, start), GOAL_MET_AT, "only a search goal needs the extra margin");
+        assert_eq!(
+            goal_threshold(goal, start, "https://www.ktronix.com/search?q=iphone#top"),
+            GOAL_MET_AT,
+            "the fragment is dropped from the page under test too"
+        );
     }
 
     #[test]
     fn mini_opens_the_search_field_only_when_jev_cannot_progress() {
-        assert!(search_recovery_wanted("BLOCKED", None));
-        assert!(search_recovery_wanted("BLOCKED", Some(0.2)));
-        assert!(search_recovery_wanted("DONE", Some(0.2)), "a DONE the goal check does not back up");
-        assert!(!search_recovery_wanted("CLICK", Some(0.2)), "a decided step is not a dead end");
-        assert!(!search_recovery_wanted("BLOCKED", Some(0.9)), "never click away from a page that answers the goal");
-        assert!(!search_recovery_wanted("DONE", Some(0.7)), "0.7 already ends the run as ok before this is asked");
+        assert!(search_recovery_wanted("BLOCKED", None, GOAL_MET_AT));
+        assert!(search_recovery_wanted("BLOCKED", Some(0.2), GOAL_MET_AT));
+        assert!(
+            search_recovery_wanted("BLOCKED", Some(0.72), GOAL_MET_AT),
+            "BLOCKED never ends a run as ok, however well the page scored"
+        );
+        assert!(search_recovery_wanted("DONE", Some(0.2), GOAL_MET_AT), "a DONE the goal check does not back up");
+        assert!(search_recovery_wanted("DONE", Some(0.6), GOAL_MET_AT), "0.6 is below the bar the page needed");
+        assert!(!search_recovery_wanted("CLICK", Some(0.2), GOAL_MET_AT), "a decided step is not a dead end");
+        assert!(
+            !search_recovery_wanted("DONE", Some(0.7), GOAL_MET_AT),
+            "an evidenced DONE ends the run as ok before this is asked"
+        );
+    }
+
+    #[test]
+    fn an_unused_search_field_is_worth_one_retry() {
+        let search = ObservedElement {
+            node: 1,
+            kind: "fill".into(),
+            role: Some("searchbox".into()),
+            label: "Search".into(),
+            ..Default::default()
+        };
+        let button = ObservedElement { node: 2, kind: "click".into(), label: "Men\u{fa}".into(), ..Default::default() };
+        let used = ObservedElement {
+            node: 3,
+            kind: "fill".into(),
+            role: Some("searchbox".into()),
+            label: "Buscar".into(),
+            ..Default::default()
+        };
+        let typed = StepRecord {
+            step: 1,
+            operation: "TYPE_TEXT".into(),
+            target_label: Some("Buscar".into()),
+            ..Default::default()
+        };
+        let candidates = vec![button.clone(), search.clone(), used.clone()];
+        assert_eq!(
+            unused_search_field(&candidates, &[]).map(|el| el.label.as_str()),
+            Some("Search"),
+            "the first search-like field the run never typed into"
+        );
+        assert_eq!(
+            unused_search_field(&candidates, std::slice::from_ref(&typed)).map(|el| el.label.as_str()),
+            Some("Search"),
+            "a field the run already typed into is not offered again"
+        );
+        let only_used = vec![button, used];
+        assert!(unused_search_field(&only_used, &[typed]).is_none(), "nothing left to name");
     }
 
     #[test]
@@ -2325,5 +2503,311 @@ mod tests {
         let welcome = cdp.eval("document.querySelector('h1') && document.querySelector('h1').textContent").unwrap();
         assert!(welcome.contains("dev@example.test"), "{welcome}");
         assert!(report.steps.iter().any(|s| s.field.as_deref() == Some("password")));
+    }
+
+    // ---- the loop itself, over a scripted page and a scripted judge ----
+
+    /// A control the snapshot would offer: visible, enabled, named.
+    fn control(id: &str, node: u64, kind: &str, role: &str, label: &str) -> ObservedElement {
+        let mut el = ObservedElement {
+            id: id.into(),
+            node,
+            kind: kind.into(),
+            role: Some(role.into()),
+            label: label.into(),
+            ..Default::default()
+        };
+        // `dev_candidates` drops what has no box on screen.
+        el.rect = crate::qa::Rect { x: 0.0, y: 0.0, w: 120.0, h: 30.0 };
+        el
+    }
+
+    /// The run's arguments for a scripted page: never read the operator's
+    /// episode log, and let the scripted URL be any host (nothing leaves the
+    /// machine — the page is a struct).
+    fn move_args(goal: &str, steps: usize) -> MoveArgs {
+        MoveArgs {
+            goal: goal.into(),
+            steps,
+            values: BTreeMap::new(),
+            url: None,
+            allow_remote: true,
+            no_text_helper: true,
+            hints_dir: None,
+            no_priors: true,
+            no_replay: true,
+        }
+    }
+
+    /// A scripted page: the loop's own evaluations answered from canned data, so
+    /// the loop runs without a window. `elements` are what the snapshot offers;
+    /// a click on one is recorded by its label.
+    struct FakePage {
+        url: String,
+        text: String,
+        elements: Vec<ObservedElement>,
+        /// Labels the run clicked, in order.
+        clicks: Vec<String>,
+        /// The control the last `hitTest` named, i.e. what a click lands on.
+        hit: Option<String>,
+    }
+
+    impl FakePage {
+        fn new(url: &str, text: &str, elements: Vec<ObservedElement>) -> FakePage {
+            FakePage { url: url.into(), text: text.into(), elements, clicks: Vec::new(), hit: None }
+        }
+
+        /// What the snapshot script would report. The whole-page text is longer
+        /// than the visible one, so the loop has no lazy content to scroll for.
+        fn observation(&self) -> String {
+            json!({
+                "ok": true,
+                "url": self.url,
+                "title": "Scripted page",
+                "w": 1280.0,
+                "h": 900.0,
+                "text": self.text,
+                "actions": self.elements,
+                "omitted_actions": 0,
+                "marker": 1,
+            })
+            .to_string()
+        }
+    }
+
+    impl Page for FakePage {
+        fn eval(&mut self, js: &str) -> Result<String, String> {
+            if js.contains("location.href") {
+                return Ok(json!(self.url).to_string());
+            }
+            if js.contains("document.readyState") {
+                return Ok(json!("complete").to_string());
+            }
+            if js.contains("typeof window.__miniQA") {
+                return Ok("true".into());
+            }
+            if js.contains("__miniQA.snapshot") {
+                return Ok(self.observation());
+            }
+            if js.contains("innerText") {
+                return Ok(json!(format!("{}\n{}", self.text, "lazy filler ".repeat(40))).to_string());
+            }
+            if js.contains("hitTest") {
+                let id = js.split("hitTest(").nth(1).and_then(|rest| rest.split(')').next()).unwrap_or("");
+                let id = id.trim().trim_matches('"');
+                match self.elements.iter().find(|el| el.id == id) {
+                    Some(el) => {
+                        self.hit = Some(el.label.clone());
+                        return Ok(json!({ "ok": true, "x": 10.0, "y": 20.0, "topmost": true }).to_string());
+                    }
+                    None => return Ok(json!({ "ok": false, "reason": "gone" }).to_string()),
+                }
+            }
+            if js.contains("[innerWidth, innerHeight]") {
+                return Ok(json!([800.0, 600.0]).to_string());
+            }
+            Ok("true".into())
+        }
+
+        fn eval_within(&mut self, js: &str, _timeout: Duration) -> Result<String, String> {
+            self.eval(js)
+        }
+        fn navigate(&mut self, url: &str) -> Result<(), String> {
+            self.url = url.to_string();
+            Ok(())
+        }
+        fn wait_for_load(&mut self, _timeout: Duration) -> Result<(), String> {
+            Ok(())
+        }
+        fn mouse_click(&mut self, _x: f64, _y: f64) -> Result<(), String> {
+            if let Some(label) = self.hit.take() {
+                self.clicks.push(label);
+            }
+            Ok(())
+        }
+        fn wheel(&mut self, _x: f64, _y: f64, _delta_y: f64) -> Result<(), String> {
+            Ok(())
+        }
+        fn press_enter(&mut self) -> Result<(), String> {
+            Ok(())
+        }
+        fn key_text(&mut self, _text: &str) -> Result<(), String> {
+            Ok(())
+        }
+        fn select_all(&mut self) -> Result<(), String> {
+            Ok(())
+        }
+        fn reconnect(&mut self) -> Result<(), String> {
+            Ok(())
+        }
+    }
+
+    /// One scripted judge answer: the operation Jev picks and the goal check
+    /// that comes back in the same request.
+    #[derive(Clone, Copy)]
+    struct Scripted {
+        operation: &'static str,
+        goal_met: f64,
+    }
+
+    fn scripted(operation: &'static str, goal_met: f64) -> Scripted {
+        Scripted { operation, goal_met }
+    }
+
+    /// Scripted Jev: answers the operations it is given, in order (the last one
+    /// repeats), with a valid choice for the target that operation needs. Every
+    /// question body is kept, so a test can read what the loop told Jev.
+    struct ScriptedAnswers {
+        answers: parking_lot::Mutex<std::collections::VecDeque<Scripted>>,
+        bodies: parking_lot::Mutex<Vec<Value>>,
+        calls: std::sync::atomic::AtomicU32,
+    }
+
+    impl ScriptedAnswers {
+        fn new(answers: Vec<Scripted>) -> ScriptedAnswers {
+            assert!(!answers.is_empty(), "a scripted judge needs at least one answer");
+            ScriptedAnswers {
+                answers: parking_lot::Mutex::new(answers.into()),
+                bodies: parking_lot::Mutex::new(Vec::new()),
+                calls: Default::default(),
+            }
+        }
+
+        /// Every question body the loop sent, in order.
+        fn bodies(&self) -> Vec<Value> {
+            self.bodies.lock().clone()
+        }
+    }
+
+    impl Judge for ScriptedAnswers {
+        fn answers(&self, body: &Value) -> Result<Value, String> {
+            self.calls.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            self.bodies.lock().push(body.clone());
+            let script = {
+                let mut queue = self.answers.lock();
+                if queue.len() > 1 {
+                    queue.pop_front().expect("the queue is not empty")
+                } else {
+                    *queue.front().expect("a scripted answer")
+                }
+            };
+            let qs = &body["questions"];
+            if qs["operation"]["criteria"].get(script.operation).is_none() {
+                return Err(format!("this page does not offer {}", script.operation));
+            }
+            let mut out = serde_json::Map::new();
+            for (operation, question) in [("CLICK", "click_target"), ("TYPE_TEXT", "type_text_target")] {
+                if script.operation != operation {
+                    continue;
+                }
+                let key = key_where(&qs[question], |_| true).ok_or_else(|| format!("no {question} offered"))?;
+                out.insert(question.into(), one_hot(&qs[question], &key));
+            }
+            out.insert("operation".into(), one_hot(&qs["operation"], script.operation));
+            out.insert("goal_met".into(), json!({ "noul": script.goal_met }));
+            Ok(Value::Object(out))
+        }
+
+        fn calls(&self) -> u32 {
+            self.calls.load(std::sync::atomic::Ordering::Relaxed)
+        }
+    }
+
+    #[test]
+    fn a_done_the_goal_check_never_backed_never_ends_the_run_as_ok() {
+        // The rottentomatoes sequence (bench p007b): a DONE the page's own
+        // check scored 0.32 on was rejected, and the run then stopped ok on the
+        // judge's word alone, on a page that never changed.
+        let mut page = FakePage::new("https://www.rottentomatoes.com/", "Forgotten Island trailers and videos", Vec::new());
+        let judge = ScriptedAnswers::new(vec![scripted("DONE", 0.32), scripted("DONE", 0.6)]);
+        let a = move_args("Search this site for \"oppenheimer\" and submit the search.", 8);
+        let report = run_loop(&mut page, &judge, None, &a);
+        assert!(!report.ok, "a DONE no goal check backed up is not a success: {}", report.stop);
+        assert_eq!(report.stop, "DONE claimed three times, but the goal check never passed");
+        assert_eq!(report.steps.iter().filter(|s| s.operation == "DONE").count(), 2, "the two rejected DONEs are on the report");
+        assert!(report.steps.iter().all(|s| s.note.as_deref() == Some("DONE rejected: the goal check found no evidence on this page")));
+        assert_eq!(report.judge_calls, 3, "the third DONE is what ends the run");
+    }
+
+    #[test]
+    fn a_done_the_goal_check_backs_ends_the_run_as_ok() {
+        let mut page = FakePage::new("https://app.example.test/", "You are signed in", Vec::new());
+        let judge = ScriptedAnswers::new(vec![scripted("DONE", 0.8)]);
+        let report = run_loop(&mut page, &judge, None, &move_args("sign in to the app", 8));
+        assert!(report.ok, "{}", report.stop);
+        assert_eq!(report.stop, "the goal check passed on this page (p=0.80)");
+        assert!(report.steps.is_empty(), "the page answered the goal: nothing was clicked");
+    }
+
+    #[test]
+    fn a_search_goal_that_never_left_its_start_page_is_not_ok() {
+        // ktronix (bench p007b): the goal check scored 0.72 on the unchanged
+        // home page and the run called itself ok with no search submitted.
+        let page_el = control("e1", 1, "click", "link", "Ofertas");
+        let mut page = FakePage::new("https://www.ktronix.com/", "Ktronix Pasion Tecno", vec![page_el]);
+        let judge = ScriptedAnswers::new(vec![scripted("CLICK", 0.72), scripted("BLOCKED", 0.72)]);
+        let a = move_args("Search this site for \"iphone 15\" and submit the search.", 8);
+        let report = run_loop(&mut page, &judge, None, &a);
+        assert!(!report.ok, "0.72 on the start page of a search is not the search: {}", report.stop);
+        assert_eq!(report.stop, "the judge reported no operation can progress");
+        assert!(
+            report.steps.iter().any(|s| s.goal_met == Some(0.72)),
+            "the page the check scored 0.72 on is on the report, and did not end the run"
+        );
+        assert!(report.url_after.starts_with("https://www.ktronix.com/"), "the search never left the home page");
+    }
+
+    #[test]
+    fn a_blocked_search_page_makes_mini_click_the_fake_trigger_itself() {
+        // Éxito (bench p007b): Jev answered BLOCKED on a page whose search box
+        // is a click-only textbox, and the opener never fired. A page the check
+        // scored well is no reason to leave it: BLOCKED never ends a run as ok.
+        for goal_met in [0.1, 0.72] {
+            let trigger = control("e1", 1, "click", "textbox", "Open search");
+            let field = control("e2", 2, "fill", "searchbox", "search");
+            let mut page = FakePage::new("https://www.exito.com/", "Compra en exito.com", vec![trigger, field]);
+            let judge = ScriptedAnswers::new(vec![scripted("BLOCKED", goal_met)]);
+            let a = move_args("Search this site for \"arroz diana\" and submit the search.", 1);
+            let report = run_loop(&mut page, &judge, None, &a);
+            assert_eq!(
+                page.clicks,
+                vec!["Open search".to_string()],
+                "goal check {goal_met}: Mini clicks the control Jev cannot type into"
+            );
+            assert!(
+                report.steps.iter().any(|s| s.note.as_deref() == Some("opened search") && s.target.as_deref() == Some("Open search")),
+                "goal check {goal_met}: the opener is on the report: {:?}",
+                report.steps
+            );
+            assert!(
+                !report.steps.iter().any(|s| s.operation == AUTO_SCROLL),
+                "goal check {goal_met}: the click happens before the lazy-load pass, which would have scrolled first"
+            );
+            assert_eq!(report.stop, "step budget of 1 reached", "the click is the run's one action");
+            assert!(!report.ok);
+        }
+    }
+
+    #[test]
+    fn an_unused_search_field_is_named_to_jev_once_before_the_run_gives_up() {
+        let field = control("e1", 1, "fill", "searchbox", "search");
+        let mut page = FakePage::new("https://www.exito.com/", "Compra en exito.com", vec![field]);
+        let judge = ScriptedAnswers::new(vec![scripted("BLOCKED", 0.1)]);
+        let a = move_args("Search this site for \"arroz diana\" and submit the search.", 8);
+        let report = run_loop(&mut page, &judge, None, &a);
+        let note = "the page has a search field: search";
+        let named = |body: &Value| {
+            body["state"]["recent_actions"]
+                .as_array()
+                .map(|rows| rows.iter().filter(|r| r["action"] == json!(note)).count())
+                .unwrap_or(0)
+        };
+        let bodies = judge.bodies();
+        assert!(bodies.len() > 1, "the retry asks again: {}", bodies.len());
+        assert_eq!(named(&bodies[0]), 0, "the first question does not claim a search field");
+        assert_eq!(named(&bodies[1]), 1, "the retry names the field Jev never typed into: {}", bodies[1]["state"]["recent_actions"]);
+        assert!(bodies.iter().all(|b| named(b) <= 1), "named once per run, never twice");
+        assert_eq!(report.stop, "the judge reported no operation can progress");
+        assert!(!report.ok);
     }
 }
