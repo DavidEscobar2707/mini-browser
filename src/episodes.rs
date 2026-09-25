@@ -450,6 +450,48 @@ fn write_atomic(path: &Path, bytes: &[u8]) -> Result<(), String> {
     })
 }
 
+
+// ---- RL phase 2 (plans/005-action-value-priors.md). STUB: worker p2-core implements. ----
+
+pub const GAMMA: f64 = 0.9;
+
+pub fn terminal_reward(ep: &Episode) -> f64 {
+    0.0
+}
+
+pub fn discounted_returns(ep: &Episode, gamma: f64) -> Vec<f64> {
+    vec![0.0; ep.steps.len()]
+}
+
+#[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq)]
+pub struct Prior {
+    pub operation: String,
+    pub target: Option<String>,
+    pub n: u32,
+    pub mean_return: f64,
+    pub exact: bool,
+}
+
+#[derive(Clone, Debug, Default)]
+pub struct PriorTable {
+    rows: Vec<(String, Prior)>,
+}
+
+impl PriorTable {
+    pub fn load(dir: Option<&Path>, host: &str) -> PriorTable {
+        PriorTable::default()
+    }
+    pub fn from_episodes(eps: &[Episode]) -> PriorTable {
+        PriorTable::default()
+    }
+    pub fn is_empty(&self) -> bool {
+        self.rows.is_empty()
+    }
+    pub fn for_page(&self, page_sig: &str, top: usize) -> Vec<Prior> {
+        Vec::new()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
