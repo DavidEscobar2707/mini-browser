@@ -1,6 +1,6 @@
 # 007 - Search reliability on non-agent-first sites + no scroll oscillation
 
-Status: IN PROGRESS. Workers: `p7-afford`, `p7-loop` (herdr, OMP, deepseek-v4.1-flash). Depends on 006.
+Status: DONE (246 tests). Bench 7/12 -> 9/12; false ok 1 -> 2 (see plan 008). Workers: `p7-afford`, `p7-loop` (herdr, OMP, deepseek-v4.1-flash). Depends on 006.
 
 ## Evidence
 Benchmark `tools/bench/run_search.py` (12 real sites; a run passes only if the query is in the final URL).
@@ -83,3 +83,10 @@ p7-afford also owns `src/learn.rs`: exclude WAIT, SCROLL_DOWN, SCROLL_UP from th
 
 ## Done / STOP
 The same as plans 004-006. The orchestrator re-runs the benchmark after the merge. Target: >= 10/12, with 0 false ok.
+
+## Result (bench p007b)
+PASS 9/12 (baseline 7/12). Fixed: homecenter (soft load), booking (refocus + suggestion), Alkosto opener.
+The scroll bounce is gone: AUTO_SCROLL runs only when needed and is logged. Still failing: exito (BLOCKED, the opener
+did not fire), ktronix (FALSE ok: goal check p=0.72 on the unchanged home page), rottentomatoes
+(FALSE ok: DONE accepted after a disputed DONE). The first bench run (p007) died when the debug
+browser crashed after 2 sites. The cause is not known and did not reproduce. The bench now restarts the browser and counts restarts.
