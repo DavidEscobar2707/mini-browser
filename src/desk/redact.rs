@@ -31,7 +31,7 @@ fn mask_after_keywords(text: &str) -> String {
             i += 1;
             continue;
         };
-        let mut j = i + k.len();
+        let mut j = i + k.chars().count();
         let delim_start = j;
         while j < chars.len() && matches!(chars[j], ' ' | ':' | '=') {
             j += 1;
