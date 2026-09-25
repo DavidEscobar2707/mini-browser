@@ -11,11 +11,13 @@ Product intent these plans serve: a coding agent working on a local app keeps on
 | 001 | Detach the debug browser and publish current.json only after CDP is listening | P1 | M | — | DONE |
 | 002 | Make current.json false when the process is dead, and add status/stop | P1 | S | 001 | DONE |
 | 003 | Let Jev take goal steps in the live loopback debug window | P1 | L | 001, 002 | DONE (plus `--observe`, `--url`, `--allow-remote`, password fields in `--move` only) |
-| 004 | Episode log, reward, human feedback (RL phase 1) | P1 | M | 003 | DONE (live-verified on Cinemark Arkadia) |
+| 004 | Episode log, reward, human feedback (RL phase 1) | P1 | M | 003 | DONE (live-verified on Cinemark Arkadia) |
+
 | 005 | Action-value priors from past episodes (RL phase 2) | P1 | M | 004 | DONE (A/B confounded by site cookie; see plan) |
 | 006 | Route replay + learned site notes (RL phases 3-4) | P1 | M | 005 | DONE (full replay: 1 Jev call vs 6-9) |
 | 007 | Search reliability on non-agent-first sites + no scroll oscillation | P1 | M | 006 | DONE (bench 7/12 -> 9/12) |
-| 008 | No false success, opener that fires, fair goal check | P1 | S | 007 | IN PROGRESS |
+| 008 | No false success, opener that fires, fair goal check | P1 | S | 007 | IN PROGRESS |
+| 009 | Desktop move: Jev picks the control in native apps (`mini --desk`) | P1 | L | 008 | TODO |
 
 Status values: TODO | IN PROGRESS | DONE | BLOCKED (with one-line reason) | REJECTED (with one-line rationale — finding fixed independently or approach abandoned)
 
