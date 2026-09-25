@@ -8,6 +8,7 @@ mod qa;
 mod cdp;
 mod move_cmd;
 mod episodes;
+mod learn;
 mod text_helper;
 
 use crate::qa::Browser;
@@ -374,6 +375,9 @@ fn main() {
     }
     if let Some(i) = args.iter().position(|a| a == "--episodes") {
         std::process::exit(move_cmd::episodes_cmd(&args, i));
+    }
+    if let Some(i) = args.iter().position(|a| a == "--learn") {
+        std::process::exit(learn::run(&args, i));
     }
     if let Some(i) = args.iter().position(|a| a == "--move") {
         std::process::exit(move_cmd::run(&args, i));
