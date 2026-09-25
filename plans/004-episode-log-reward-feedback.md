@@ -1,6 +1,6 @@
 # 004 - Episode log, reward, and human feedback (RL phase 1)
 
-Status: IN PROGRESS. Orchestrator: Hermes. Workers: `ep-core`, `ep-wire` (herdr, OMP, deepseek-v4.1-flash).
+Status: DONE (merged e33117d, 180 tests). Orchestrator: Hermes. Workers: `ep-core`, `ep-wire` (herdr, OMP, deepseek-v4.1-flash).
 
 ## Why
 
@@ -94,3 +94,12 @@ summary skips a corrupt line).
 ## STOP conditions
 - Needing to change a signature in the contract: stop and write `BLOCKED` with the change you need.
 - Build tools missing / cargo fails for reasons outside owned files: `BLOCKED`.
+
+## Findings from the first live episode (input for phase 2)
+
+- Credit assignment: goal_met stays ~0.02 on every page before the answer page, so the
+  per-step delta is sparse and the LAST step takes all the credit (a WAIT got +0.89;
+  the useful clicks got ~-0.05). Phase 2 must score actions by discounted return
+  (G_t = r_t + 0.9 * G_{t+1}), not by the raw step reward.
+- The no-effect penalty works: the dead "Close" click scored -0.36.
+- Human feedback overrides a model "ok": ok=true, final_reward=-2.0 after `--feedback bad`.
