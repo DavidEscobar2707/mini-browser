@@ -57,6 +57,26 @@ Loopback hosts only unless you pass `--allow-remote`. Needs a Jev key (see
 `1` = stopped without DONE, `2` = could not run. `DONE` is the model's claim —
 verify the outcome yourself.
 
+## Episodes and feedback
+
+Every `--move` run is appended to `%LOCALAPPDATA%\Mini\episodes\<host>.jsonl`
+(host without `www.`), one episode per line, with a reward computed in code —
+never by the model. Logging is best effort: if it fails you get one line on
+stderr and the run's own exit code is unchanged.
+
+```powershell
+mini --feedback bad "clicked past the results"   # label the newest episode
+mini --feedback good --id 1758742123456-8123     # or one by its id
+mini --episodes                                  # summary of every episode (JSON)
+mini --episodes github.com                       # just one host
+```
+
+`mini --feedback` prints the updated episode, `mini --episodes` the summary
+(`episodes`, `ok_rate`, `mean_final_reward`, `mean_judge_calls`,
+`mean_elapsed_ms`, `actions[]` sorted by mean reward). Neither opens a window
+or calls Jev. `bad` costs the run more than its own reward; `good` never scores
+below `1.0`.
+
 ## Site lessons
 
 `--move` sends Jev the lessons for the current site: the file `<host>.md` (no

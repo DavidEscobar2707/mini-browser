@@ -13,6 +13,7 @@
 
 use crate::text_helper::{self, TextHelper};
 use crate::cdp::Cdp;
+use crate::episodes;
 use crate::qa::{firewall, jev, probes, questions, Judge, ObservedElement, Observation, StepRecord};
 use serde::Serialize;
 use serde_json::{json, Value};
@@ -139,6 +140,9 @@ pub struct MoveStep {
     pub goal_met: Option<f64>,
     /// The page this step started on.
     pub url: String,
+    /// Fingerprint of that page (`episodes::page_signature`): the same URL
+    /// with the same controls, so showtimes and prices do not split it.
+    pub page_sig: String,
     pub page_changed: bool,
     pub note: Option<String>,
     pub ms: u64,
@@ -148,6 +152,10 @@ pub struct MoveStep {
 pub struct MoveReport {
     pub ok: bool,
     pub stop: String,
+    /// Id of the episode this run was filed as (`%LOCALAPPDATA%\Mini\episodes`),
+    /// absent when logging the episode failed. `mini --feedback` takes it.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub episode_id: Option<String>,
     pub url_before: String,
     pub url_after: String,
     pub judge_calls: u32,
@@ -162,8 +170,9 @@ pub struct MoveReport {
     pub page_text: String,
 }
 
-fn fail(msg: &str) -> i32 {
-    eprintln!("mini --move: {msg}");
+/// One-line operator failure for a `mini --<cmd>` command; exit 2.
+fn fail(cmd: &str, msg: &str) -> i32 {
+    eprintln!("mini --{cmd}: {msg}");
     2
 }
 
@@ -288,6 +297,12 @@ const ANIMATIONS_SETTLED: &str = "new Promise(resolve => { const end = performan
 
 fn page_changed(before: &Observation, after: &Observation) -> bool {
     before.url != after.url || before.marker != after.marker
+}
+
+/// The controls a snapshot offers, in DOM order: the episode log's page
+/// fingerprint input (`episodes::page_signature`).
+fn control_labels(actions: &[ObservedElement]) -> Vec<String> {
+    actions.iter().map(|el| el.label.clone()).collect()
 }
 
 fn criteria_ids(q: &Value) -> Vec<String> {
@@ -647,6 +662,9 @@ fn run_loop(cdp: &mut Cdp, judge: &dyn Judge, helper: Option<&TextHelper>, a: &M
             add_site_notes(&mut question, &notes);
         }
         last_page = before.clone();
+        // What page this step starts on, for the episode log: the same URL
+        // with the same controls is the same page, whatever the showtimes are.
+        let page_sig = episodes::page_signature(&before.url, &control_labels(&before.actions));
         let decision = match decide(judge, &question, &candidates) {
             Ok(d) => d,
             Err(e) if !rejected_once => {
@@ -684,6 +702,7 @@ fn run_loop(cdp: &mut Cdp, judge: &dyn Judge, helper: Option<&TextHelper>, a: &M
                 confidence: decision.confidence,
                 goal_met: decision.goal_met,
                 url: before.url.clone(),
+                page_sig: page_sig.clone(),
                 page_changed: false,
                 note: Some(why.into()),
                 ms: 0,
@@ -758,6 +777,7 @@ fn run_loop(cdp: &mut Cdp, judge: &dyn Judge, helper: Option<&TextHelper>, a: &M
             confidence: decision.confidence,
             goal_met: decision.goal_met,
             url: before.url.clone(),
+            page_sig: page_sig.clone(),
             page_changed: changed,
             note: note.clone(),
             ms: step_started.elapsed().as_millis() as u64,
@@ -819,6 +839,7 @@ fn run_loop(cdp: &mut Cdp, judge: &dyn Judge, helper: Option<&TextHelper>, a: &M
     MoveReport {
         ok,
         stop,
+        episode_id: None,
         url_before,
         url_after,
         judge_calls: judge.calls(),
@@ -835,42 +856,52 @@ pub fn run(args: &[String], index: usize) -> i32 {
     let stdin = read_stdin_json();
     let a = match parse_args(&args[index + 1..], stdin.as_deref()) {
         Ok(a) => a,
-        Err(e) => return fail(&e),
+        Err(e) => return fail("move", &e),
     };
     let Some(api_key) = crate::qa::jev::api_key() else {
-        return fail(&format!(
-            "no Jev API key found. --move asks Jev (api.typesafe.ai) for each step — {}.",
-            crate::qa::jev::key_help()
-        ));
+        return fail(
+            "move",
+            &format!(
+                "no Jev API key found. --move asks Jev (api.typesafe.ai) for each step — {}.",
+                crate::qa::jev::key_help()
+            ),
+        );
     };
     let model = crate::qa::jev::model();
     let mut cdp = match attach() {
         Ok(c) => c,
-        Err(e) => return fail(&e),
+        Err(e) => return fail("move", &e),
     };
     if let Some(url) = &a.url {
-        let Some(resolved) = crate::omnibox::resolve(url) else { return fail(&format!("cannot open {url}")) };
+        let Some(resolved) = crate::omnibox::resolve(url) else { return fail("move", &format!("cannot open {url}")) };
         if !a.allow_remote && !is_loopback_host(&resolved) {
-            return fail(&format!("{} is not loopback; pass --allow-remote to drive other sites", firewall::host_only(&resolved)));
+            return fail(
+                "move",
+                &format!("{} is not loopback; pass --allow-remote to drive other sites", firewall::host_only(&resolved)),
+            );
         }
         if let Err(e) = cdp.navigate(&resolved).and_then(|_| cdp.wait_for_load(Duration::from_secs(20))) {
-            return fail(&e);
+            return fail("move", &e);
         }
     }
     let url = cdp.eval("location.href").map(|s| s.trim_matches('"').to_string()).unwrap_or_default();
     if !(url.starts_with("http://") || url.starts_with("https://")) {
-        return fail("navigate the debug window to a page first (or pass --url)");
+        return fail("move", "navigate the debug window to a page first (or pass --url)");
     }
     if !a.allow_remote && !is_loopback_host(&url) {
-        return fail(&format!(
-            "{} is not loopback; pass --allow-remote to drive other sites, or use mini --qa",
-            firewall::host_only(&url)
-        ));
+        return fail(
+            "move",
+            &format!(
+                "{} is not loopback; pass --allow-remote to drive other sites, or use mini --qa",
+                firewall::host_only(&url)
+            ),
+        );
     }
 
     let judge = jev::JevClient::new(api_key, model);
     let helper = if a.no_text_helper { None } else { TextHelper::from_settings() };
-    let report = run_loop(&mut cdp, &judge, helper.as_ref(), &a);
+    let mut report = run_loop(&mut cdp, &judge, helper.as_ref(), &a);
+    log_episode(&mut report, &a.goal);
     let text = serde_json::to_string(&report).unwrap_or_default();
     let _ = std::fs::write(move_json_path(), serde_json::to_string_pretty(&report).unwrap_or_default());
     println!("{text}");
@@ -878,6 +909,154 @@ pub fn run(args: &[String], index: usize) -> i32 {
         0
     } else {
         1
+    }
+}
+
+/// Files the finished run as an RL episode in the default episodes folder and
+/// puts its id on the report. Logging is best effort: a failure prints one
+/// line and leaves the run's own result — and exit code — untouched.
+fn log_episode(report: &mut MoveReport, goal: &str) {
+    let mut ep = episodes::build_episode(
+        goal,
+        report.ok,
+        &report.stop,
+        report.judge_calls,
+        report.elapsed_ms,
+        &raw_steps(&report.steps),
+    );
+    // The episode is filed under the host the run started on, never derived.
+    ep.host = episode_host(&report.url_before);
+    match episodes::append(None, &ep) {
+        Ok(_) => report.episode_id = (!ep.id.is_empty()).then(|| ep.id.clone()),
+        Err(e) => eprintln!("mini --move: episode not logged: {e}"),
+    }
+}
+
+/// The run's steps as the episode log wants them: the page each step started
+/// on, whether it changed, and Jev's goal check for that page.
+fn raw_steps(steps: &[MoveStep]) -> Vec<episodes::RawStep> {
+    steps
+        .iter()
+        .map(|s| episodes::RawStep {
+            step: s.step,
+            operation: s.operation.clone(),
+            target: s.target.clone(),
+            page_sig: s.page_sig.clone(),
+            url: s.url.clone(),
+            page_changed: s.page_changed,
+            goal_met: s.goal_met,
+            ms: s.ms,
+        })
+        .collect()
+}
+
+/// The host an episode is filed under: no `www.`, no port, lowercase. Accepts
+/// a full URL or a bare authority (`github.com`, `localhost:3000`).
+pub fn episode_host(url_or_host: &str) -> String {
+    let given = url_or_host.trim();
+    let url = if given.contains("://") { given.to_string() } else { format!("http://{given}") };
+    let host = firewall::host_only(&url);
+    host.strip_prefix("www.").unwrap_or(&host).to_string()
+}
+
+/// `--feedback` as given on the command line: the words after the flag.
+#[derive(Debug, Default, PartialEq)]
+pub struct FeedbackArgs {
+    /// `good` or `bad`, lowercased.
+    pub label: String,
+    /// The operator's words for why, joined by single spaces.
+    pub reason: Option<String>,
+    /// The episode to label; `None` = the newest one.
+    pub id: Option<String>,
+}
+
+/// Parses `--feedback good|bad ["reason"] [--id ID]` (the words after the
+/// flag). The label is case-insensitive and must come first; every later word
+/// that is not `--id` is part of the reason.
+pub fn parse_feedback_args(args: &[String]) -> Result<FeedbackArgs, String> {
+    const USAGE: &str = "usage: mini --feedback good|bad [reason] [--id ID]";
+    let mut out = FeedbackArgs::default();
+    let mut reason: Vec<&str> = Vec::new();
+    let mut i = 0;
+    while i < args.len() {
+        match args[i].as_str() {
+            "--id" => {
+                out.id = Some(args.get(i + 1).ok_or("--id needs an episode id")?.clone());
+                i += 1;
+            }
+            flag if flag.starts_with("--") => return Err(format!("unknown flag {flag}; {USAGE}")),
+            word if out.label.is_empty() => out.label = word.to_ascii_lowercase(),
+            word => reason.push(word),
+        }
+        i += 1;
+    }
+    if out.label.is_empty() {
+        return Err(format!("missing a label; {USAGE}"));
+    }
+    if out.label != "good" && out.label != "bad" {
+        return Err(format!("{} is not a label; use good or bad", out.label));
+    }
+    if !reason.is_empty() {
+        out.reason = Some(reason.join(" "));
+    }
+    Ok(out)
+}
+
+/// `--episodes` as given on the command line: the words after the flag.
+#[derive(Debug, Default, PartialEq)]
+pub struct EpisodesArgs {
+    /// Host to narrow the summary to (`www.` dropped, port dropped); `None` =
+    /// every host.
+    pub host: Option<String>,
+}
+
+/// Parses `--episodes [host]`. A host or a full URL is accepted.
+pub fn parse_episodes_args(args: &[String]) -> Result<EpisodesArgs, String> {
+    let mut out = EpisodesArgs::default();
+    for word in args {
+        if word.starts_with("--") {
+            return Err(format!("unknown flag {word}; usage: mini --episodes [host]"));
+        }
+        if out.host.is_some() {
+            return Err(format!("--episodes takes one host; got an extra {word}"));
+        }
+        let host = episode_host(word);
+        if host.is_empty() {
+            return Err("--episodes needs a host or a URL".into());
+        }
+        out.host = Some(host);
+    }
+    Ok(out)
+}
+
+/// `mini --feedback good|bad ["reason"] [--id ID]`: label an episode — the
+/// newest one unless `--id` names another — and print it as JSON.
+pub fn feedback(args: &[String], index: usize) -> i32 {
+    let f = match parse_feedback_args(&args[index + 1..]) {
+        Ok(f) => f,
+        Err(e) => return fail("feedback", &e),
+    };
+    match episodes::set_feedback(None, f.id.as_deref(), &f.label, f.reason.as_deref()) {
+        Ok(ep) => {
+            println!("{}", serde_json::to_string(&ep).unwrap_or_default());
+            0
+        }
+        Err(e) => fail("feedback", &e),
+    }
+}
+
+/// `mini --episodes [host]`: every episode logged, summarised as JSON.
+pub fn episodes_cmd(args: &[String], index: usize) -> i32 {
+    let a = match parse_episodes_args(&args[index + 1..]) {
+        Ok(a) => a,
+        Err(e) => return fail("episodes", &e),
+    };
+    match episodes::summary(None, a.host.as_deref()) {
+        Ok(v) => {
+            println!("{v}");
+            0
+        }
+        Err(e) => fail("episodes", &e),
     }
 }
 
@@ -1043,6 +1222,7 @@ mod tests {
             confidence: 0.9,
             goal_met: None,
             url: String::new(),
+            page_sig: String::new(),
             page_changed: true,
             note: None,
             ms: 5,
@@ -1051,6 +1231,62 @@ mod tests {
         assert!(text.contains("\"field\":\"password\""));
         assert!(!text.contains("s3cr3t"));
     }
+
+    #[test]
+    fn parse_feedback_takes_a_label_a_reason_and_an_id() {
+        let f = parse_feedback_args(&args(&["bad", "wrong", "showtime", "--id", "17-42"])).unwrap();
+        assert_eq!(f.label, "bad");
+        assert_eq!(f.reason.as_deref(), Some("wrong showtime"));
+        assert_eq!(f.id.as_deref(), Some("17-42"));
+        let newest = parse_feedback_args(&args(&["GOOD"])).unwrap();
+        assert_eq!(newest.label, "good", "the label is case-insensitive");
+        assert_eq!((newest.reason, newest.id), (None, None), "no reason and no id is the newest episode");
+    }
+
+    #[test]
+    fn parse_feedback_rejects_a_missing_or_unknown_label() {
+        assert!(parse_feedback_args(&args(&[])).is_err(), "a label is required");
+        assert!(parse_feedback_args(&args(&["meh"])).is_err(), "only good and bad are labels");
+        assert!(parse_feedback_args(&args(&["good", "--id"])).is_err(), "--id needs a value");
+        assert!(parse_feedback_args(&args(&["good", "--all"])).is_err(), "an unknown flag is a typo, not a reason");
+    }
+
+    #[test]
+    fn parse_episodes_takes_one_optional_host() {
+        assert_eq!(parse_episodes_args(&args(&[])).unwrap().host, None, "no host means every host");
+        let url = parse_episodes_args(&args(&["https://www.github.com/search?q=x"])).unwrap();
+        assert_eq!(url.host.as_deref(), Some("github.com"), "a pasted URL becomes its host, www dropped");
+        let host_port = parse_episodes_args(&args(&["localhost:3000"])).unwrap();
+        assert_eq!(host_port.host.as_deref(), Some("localhost"), "a bare host keeps no port");
+        assert!(parse_episodes_args(&args(&["a.com", "b.com"])).is_err(), "one host only");
+        assert!(parse_episodes_args(&args(&["--all"])).is_err());
+    }
+
+    #[test]
+    fn raw_steps_carry_the_page_signature_and_the_goal_check() {
+        let step = MoveStep {
+            step: 2,
+            operation: "CLICK".into(),
+            target: Some("Search".into()),
+            field: None,
+            text: None,
+            confidence: 0.9,
+            goal_met: Some(0.2),
+            url: "https://www.github.com/search".into(),
+            page_sig: "github.com/search#deadbeef".into(),
+            page_changed: true,
+            note: None,
+            ms: 12,
+        };
+        let raw = raw_steps(&[step]);
+        assert_eq!(raw.len(), 1);
+        assert_eq!(raw[0].step, 2);
+        assert_eq!(raw[0].page_sig, "github.com/search#deadbeef");
+        assert_eq!(raw[0].goal_met, Some(0.2), "the episode log gets the goal check of the page the step started on");
+        assert_eq!(raw[0].target.as_deref(), Some("Search"));
+        assert_eq!(raw[0].ms, 12);
+    }
+
     /// Scripted Jev stand-in: types every supplied field it is offered, then
     /// clicks the button named `submit`, then reports DONE once `done_text` is
     /// on the page. Answers in the exact `/v1/systemone` shape.
