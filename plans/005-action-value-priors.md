@@ -1,6 +1,6 @@
 # 005 - Action-value priors from past episodes (RL phase 2)
 
-Status: IN PROGRESS. Orchestrator: Hermes. Workers: `p2-core`, `p2-wire` (herdr, OMP, deepseek-v4.1-flash).
+Status: DONE (192 tests; live A/B on Cinemark). Orchestrator: Hermes. Workers: `p2-core`, `p2-wire` (herdr, OMP, deepseek-v4.1-flash).
 Depends on: 004 (episode log).
 
 ## Why
@@ -77,3 +77,12 @@ fallback merge (weighted mean); a known-bad row survives the `top` cut; load of 
 ## Done means / STOP
 Same as plan 004: tests green, commit on own branch, no merge/push/secrets, final line
 `DONE <branch> <sha> <N tests passed>` or `BLOCKED <reason>`.
+
+## Findings from the live A/B (3 runs --no-priors vs 3 runs with priors, alternated)
+
+- All 6 runs ok; no loading placeholders left in page_text (the 004 bad label is fixed).
+- Priors reached Jev: 4/4 steps of the later prior runs carried a prior_return.
+- The A/B is CONFOUNDED: Cinemark keeps the chosen city in a cookie, so after run 1 the
+  baseline also skipped the pop-up (7 -> 5 Jev calls). A fair A/B needs a fresh browser
+  profile per run, or alternating order with site state cleared. On this easy task,
+  priors did not change the call count (5 vs 5). The gain must come from replay (phase 3).

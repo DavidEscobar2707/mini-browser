@@ -616,6 +616,51 @@ fn path_part(page_sig: &str) -> &str {
     page_sig.split_once('#').map(|(path, _)| path).unwrap_or(page_sig)
 }
 
+
+// ---- RL phases 3/4 (plans/006-route-replay-and-learn.md) ----
+
+#[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq)]
+pub struct RouteStep {
+    pub operation: String,
+    pub target: Option<String>,
+    pub page_sig: String,
+    pub url: String,
+}
+
+#[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq)]
+pub struct Route {
+    pub episode_id: String,
+    pub goal_key: String,
+    pub final_reward: f64,
+    pub steps: Vec<RouteStep>,
+}
+
+/// `<host><path>#<hash8>` -> `<host><path>`.
+pub fn path_of_sig(sig: &str) -> &str {
+    sig.split_once('#').map(|(p, _)| p).unwrap_or(sig)
+}
+
+/// Every readable episode of one host (corrupt lines skipped; missing file = empty).
+pub fn load_episodes(dir: Option<&Path>, host: &str) -> Vec<Episode> {
+    let path = root_dir(dir).join(format!("{}.jsonl", file_stem_for(&host_of(host))));
+    std::fs::read_to_string(&path)
+        .map(|t| t.lines().filter_map(|l| serde_json::from_str::<Episode>(l.trim()).ok()).collect())
+        .unwrap_or_default()
+}
+
+/// STUB: worker p3-replay implements (rules in plan 006).
+pub fn best_route(eps: &[Episode], goal_key: &str) -> Option<Route> {
+    let _ = (eps, goal_key);
+    None
+}
+
+impl PriorTable {
+    /// Every aggregated row as (page_sig, prior).
+    pub fn rows(&self) -> Vec<(String, Prior)> {
+        self.rows.clone()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
