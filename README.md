@@ -57,6 +57,17 @@ Loopback hosts only unless you pass `--allow-remote`. Needs a Jev key (see
 `1` = stopped without DONE, `2` = could not run. `DONE` is the model's claim —
 verify the outcome yourself.
 
+Every step also tells Jev what earlier runs on the same page learned:
+`past_runs` (what Jev sees) lists `operation`, `target`, `n` (times tried) and
+`mean_return` — the discounted reward of that action, where above `0` helped
+reach the goal and below `0` wasted steps or led to a wrong result. Jev is told
+to prefer a high `mean_return` and to avoid a negative one unless nothing else
+can progress. `steps[].prior_return` in the result reports the value of the
+action that step took, absent when the page has no history; `--no-priors` asks
+Jev without any of it. `page_text` in the result is read once the page stops
+changing (max 5 s), with lines that are only a loading word (`Cargando…`,
+`Loading…`) dropped.
+
 ## Episodes and feedback
 
 Every `--move` run is appended to `%LOCALAPPDATA%\Mini\episodes\<host>.jsonl`
@@ -76,6 +87,10 @@ mini --episodes github.com                       # just one host
 `mean_elapsed_ms`, `actions[]` sorted by mean reward). Neither opens a window
 or calls Jev. `bad` costs the run more than its own reward; `good` never scores
 below `1.0`.
+
+`--move` reads this log back through `past_runs`: the summary's `actions[]`
+rows carry `mean_return` (the same discounted action value the loop sends Jev)
+next to the raw `mean_reward`.
 
 ## Site lessons
 

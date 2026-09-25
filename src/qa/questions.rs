@@ -510,7 +510,10 @@ already tried on this page that changed nothing: they are not offered again; cho
 forward, such as another control, SCROLL_DOWN, or DONE when the evidence is already on the page. \
 After typing a search, submit it: PRESS_ENTER when offered, or CLICK the matching search button; do \
 not open help or documentation links. site_notes, when present, are lessons from earlier runs on this \
-site: follow them.";
+site: follow them. past_runs, when present, lists actions taken on this same page in earlier runs: \
+n = times tried, mean_return = discounted reward (above 0 helped reach the goal; below 0 wasted steps \
+or led to a wrong result). Prefer an offered action with a high mean_return. Avoid actions with a \
+negative mean_return unless nothing else can progress.";
 
 const MOVE_TARGET: &str = "Choose the best observed target if the next operation is the one named in \
 this question. Use the operator's entire goal, form_id, field values, nearby text, and \
