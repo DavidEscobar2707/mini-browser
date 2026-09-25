@@ -83,10 +83,26 @@ remounts, network/stream causation), MUST use Mini's own debug mode:
    `--move`; their contents are never read.
 4. Result: one JSON line on stdout, same object in
    `%LOCALAPPDATA%\Mini\Debug\move.json` (`ok`, `stop`, `steps[]` with the
-   field NAME typed, never the value). `ok` is the model's DONE — verify.
+   field NAME typed, never the value, plus `episode_id` for the log in 6).
+   `ok` is the model's DONE — verify.
 5. Loopback only unless `--allow-remote`. `--qa` policy is unchanged and is
    not used by `--move`.
-6. Live E2E without Jev: serve `tools\fixtures` on :8000, launch
+6. Every run is also appended to the episode log
+   `%LOCALAPPDATA%\Mini\episodes\<host>.jsonl` (host without `www.`, one
+   `Episode` JSON per line, append only; the newest id is in
+   `episodes\last.json`), with a reward computed in code, never by the model.
+   `steps[].page_sig` is the page fingerprint of the page the step started on
+   (`<host><path-pattern>#<hash8>`): same page across runs, digits/prices/
+   showtimes ignored. Logging is best effort — a failure prints one line to
+   stderr and leaves the run's exit code alone.
+7. Label the episode once you have read the result; the operator is the
+   reward signal. Neither command opens a window or calls Jev:
+   - `mini --feedback good|bad ["reason"] [--id ID]` → the updated episode
+     JSON, exit 0; bad input exit 2. No `--id` = the newest episode.
+   - `mini --episodes [host]` → the summary JSON (`episodes`, `ok_rate`,
+     `mean_final_reward`, `mean_judge_calls`, `mean_elapsed_ms`, `actions[]`),
+     every host when none is named.
+8. Live E2E without Jev: serve `tools\fixtures` on :8000, launch
    `mini --debug http://127.0.0.1:8000/login.html`, then
    `cmd.exe /c "tools\win-cargo.cmd" test live_move -- --ignored`.
 

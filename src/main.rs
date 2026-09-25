@@ -369,6 +369,12 @@ fn main() {
     if args.iter().any(|a| a == "--read") {
         std::process::exit(move_cmd::read());
     }
+    if let Some(i) = args.iter().position(|a| a == "--feedback") {
+        std::process::exit(move_cmd::feedback(&args, i));
+    }
+    if let Some(i) = args.iter().position(|a| a == "--episodes") {
+        std::process::exit(move_cmd::episodes_cmd(&args, i));
+    }
     if let Some(i) = args.iter().position(|a| a == "--move") {
         std::process::exit(move_cmd::run(&args, i));
     }
