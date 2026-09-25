@@ -42,6 +42,9 @@ pub struct MoveArgs {
     pub no_text_helper: bool,
     /// Folder of per-site lesson files (`<host>.md`), sent to Jev as site_notes.
     pub hints_dir: Option<std::path::PathBuf>,
+    /// Do not read the action values earlier runs earned on this host
+    /// (`--no-priors`): every step asks Jev with no `past_runs`.
+    pub no_priors: bool,
 }
 
 /// Parses `--move --goal <text> [--steps N] [--value name=value]... [--url U]
@@ -72,6 +75,7 @@ pub fn parse_args(args: &[String], stdin_json: Option<&str>) -> Result<MoveArgs,
             }
             "--allow-remote" => out.allow_remote = true,
             "--no-text-helper" => out.no_text_helper = true,
+            "--no-priors" => out.no_priors = true,
             "--hints" => {
                 out.hints_dir = Some(next.ok_or("--hints needs a folder")?.into());
                 i += 1;
@@ -144,6 +148,10 @@ pub struct MoveStep {
     /// with the same controls, so showtimes and prices do not split it.
     pub page_sig: String,
     pub page_changed: bool,
+    /// Mean discounted return earlier runs got for this same (operation,
+    /// target) on this page, when `past_runs` offered it.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub prior_return: Option<f64>,
     pub note: Option<String>,
     pub ms: u64,
 }
@@ -595,6 +603,45 @@ fn load_whole_page(cdp: &mut Cdp) {
     let _ = cdp.eval_within(SCROLL_THROUGH, Duration::from_secs(15));
 }
 
+/// How long the whole-page text must hold its length before the report calls
+/// it final, and how long the wait may last.
+const PAGE_SETTLE: Duration = Duration::from_millis(400);
+const PAGE_SETTLE_LIMIT: Duration = Duration::from_secs(5);
+
+/// The whole page once it stops growing. Right after the scroll-through, lazy
+/// sections and the "Cargando…" placeholders that stand in for them settle a
+/// beat later, so two reads `PAGE_SETTLE` apart with the same length are taken
+/// as final. A page that never settles still produces a report (5 s cap).
+fn settled_page_text(cdp: &mut Cdp) -> String {
+    let deadline = Instant::now() + PAGE_SETTLE_LIMIT;
+    let mut last = full_text(cdp);
+    loop {
+        std::thread::sleep(PAGE_SETTLE);
+        let now = full_text(cdp);
+        if now.len() == last.len() || Instant::now() >= deadline {
+            return now;
+        }
+        last = now;
+    }
+}
+
+/// Lines that are nothing but a loading placeholder. A live run reported a
+/// Cinemark showtimes page with a "Cargando…" line still in it after the list
+/// below had rendered, and the operator read the report as still loading.
+const LOADING_LINES: [&str; 6] =
+    ["cargando", "loading", "cargando...", "loading...", "cargando\u{2026}", "loading\u{2026}"];
+
+/// Drops report lines that say only that something is loading. A line with any
+/// other text keeps its place; a placeholder between two sections leaves no
+/// blank line behind.
+pub fn drop_loading_lines(text: &str) -> String {
+    text.split('\n').filter(|line| !is_loading_line(line)).collect::<Vec<_>>().join("\n")
+}
+
+fn is_loading_line(line: &str) -> bool {
+    LOADING_LINES.contains(&line.trim().to_lowercase().as_str())
+}
+
 /// Cap for the whole-page text sent to Jev and returned to the caller.
 /// Reliability first: large enough for a results page's lower sections.
 const REST_OF_PAGE: usize = 9000;
@@ -602,6 +649,33 @@ const REPORT_TEXT: usize = 20000;
 
 fn move_json_path() -> std::path::PathBuf {
     dirs::data_local_dir().expect("%LOCALAPPDATA% is unavailable").join("Mini").join("Debug").join("move.json")
+}
+
+/// Prior rows offered for one page: enough to cover its controls without
+/// burying the elements table in history.
+const PRIORS_PER_PAGE: usize = 12;
+
+/// The action values this page's earlier runs earned, as the `past_runs` state
+/// Jev reads. `None` when there is nothing to say: an empty array would read
+/// as "no action on this page ever worked".
+pub fn past_runs_json(priors: &[episodes::Prior]) -> Option<Value> {
+    (!priors.is_empty()).then(|| json!(priors))
+}
+
+/// What earlier runs got for the action Jev just chose, matched on the
+/// (operation, target) pair `PriorTable::from_episodes` aggregates by.
+pub fn prior_return_for(priors: &[episodes::Prior], operation: &str, target: Option<&str>) -> Option<f64> {
+    priors.iter().find(|p| p.operation == operation && p.target.as_deref() == target).map(|p| p.mean_return)
+}
+
+/// This host's action values, read once per run (`--no-priors` opts out).
+/// The log is a best-effort cache: a missing or unreadable file is an empty
+/// table, never a failed run.
+fn load_priors(a: &MoveArgs, url_before: &str) -> episodes::PriorTable {
+    if a.no_priors {
+        return episodes::PriorTable::default();
+    }
+    episodes::PriorTable::load(None, &episode_host(url_before))
 }
 
 /// The loop, over the I/O seams, so it can run against a fake judge in tests.
@@ -625,6 +699,9 @@ fn run_loop(cdp: &mut Cdp, judge: &dyn Judge, helper: Option<&TextHelper>, a: &M
     // URLs given a second load pass before accepting BLOCKED / no progress.
     let mut reloaded: std::collections::HashSet<String> = std::collections::HashSet::new();
     let url_before = cdp.eval("location.href").map(|s| s.trim_matches('"').to_string()).unwrap_or_default();
+    // Action values from earlier runs on this host, read once: every step
+    // offers Jev the rows of the page it starts on.
+    let priors = load_priors(a, &url_before);
 
     let mut stop = loop {
         if steps.len() >= a.steps {
@@ -665,6 +742,12 @@ fn run_loop(cdp: &mut Cdp, judge: &dyn Judge, helper: Option<&TextHelper>, a: &M
         // What page this step starts on, for the episode log: the same URL
         // with the same controls is the same page, whatever the showtimes are.
         let page_sig = episodes::page_signature(&before.url, &control_labels(&before.actions));
+        // What earlier runs learned about that page. Offered with the step, so
+        // a known-good action is preferred and a known-wasted click avoided.
+        let page_priors = priors.for_page(&page_sig, PRIORS_PER_PAGE);
+        if let Some(rows) = past_runs_json(&page_priors) {
+            question["state"]["past_runs"] = rows;
+        }
         let decision = match decide(judge, &question, &candidates) {
             Ok(d) => d,
             Err(e) if !rejected_once => {
@@ -704,6 +787,7 @@ fn run_loop(cdp: &mut Cdp, judge: &dyn Judge, helper: Option<&TextHelper>, a: &M
                 url: before.url.clone(),
                 page_sig: page_sig.clone(),
                 page_changed: false,
+                prior_return: prior_return_for(&page_priors, "DONE", None),
                 note: Some(why.into()),
                 ms: 0,
             });
@@ -779,6 +863,7 @@ fn run_loop(cdp: &mut Cdp, judge: &dyn Judge, helper: Option<&TextHelper>, a: &M
             url: before.url.clone(),
             page_sig: page_sig.clone(),
             page_changed: changed,
+            prior_return: prior_return_for(&page_priors, &decision.operation, label.as_deref()),
             note: note.clone(),
             ms: step_started.elapsed().as_millis() as u64,
         });
@@ -830,9 +915,10 @@ fn run_loop(cdp: &mut Cdp, judge: &dyn Judge, helper: Option<&TextHelper>, a: &M
     if let Ok(now) = snapshot(cdp) {
         last_page = now;
     }
-    // The caller reads the result from the report: return the whole page.
+    // The caller reads the result from the report: return the whole page once
+    // it has settled, without any line that only says something is loading.
     load_whole_page(cdp);
-    let whole = full_text(cdp);
+    let whole = drop_loading_lines(&settled_page_text(cdp));
     if !whole.trim().is_empty() {
         last_page.text = whole.chars().take(REPORT_TEXT).collect();
     }
@@ -1141,6 +1227,79 @@ mod tests {
     }
 
     #[test]
+    fn no_priors_is_off_until_the_flag_asks_for_it() {
+        assert!(!parse_args(&args(&["--goal", "x"]), None).unwrap().no_priors, "the log is read by default");
+        let off = parse_args(&args(&["--goal", "x", "--no-priors"]), None).unwrap();
+        assert!(off.no_priors);
+        let a = MoveArgs { goal: "x".into(), no_priors: true, ..Default::default() };
+        assert!(load_priors(&a, "https://www.github.com/").is_empty(), "--no-priors never reads the log");
+    }
+
+    fn prior(operation: &str, target: Option<&str>, n: u32, mean_return: f64) -> episodes::Prior {
+        episodes::Prior { operation: operation.into(), target: target.map(str::to_string), n, mean_return, exact: true }
+    }
+
+    #[test]
+    fn past_runs_state_is_absent_without_rows_and_serializes_the_priors() {
+        assert!(past_runs_json(&[]).is_none(), "no rows: no key, not an empty array");
+        let rows = vec![prior("CLICK", Some("Search"), 3, 0.72), prior("CLICK", Some("Close"), 2, -1.4)];
+        let json = past_runs_json(&rows).expect("rows are offered");
+        assert_eq!(json[0]["operation"], "CLICK");
+        assert_eq!(json[0]["target"], "Search");
+        assert_eq!(json[0]["n"], 3);
+        assert_eq!(json[0]["mean_return"], 0.72);
+        assert_eq!(json[0]["exact"], true);
+        assert_eq!(json.as_array().unwrap().len(), 2);
+    }
+
+    #[test]
+    fn a_steps_prior_return_is_the_mean_of_the_action_it_chose() {
+        let rows = vec![prior("CLICK", Some("Search"), 5, 0.4), prior("CLICK", Some("Close"), 2, -1.1)];
+        assert_eq!(prior_return_for(&rows, "CLICK", Some("Search")), Some(0.4));
+        assert_eq!(prior_return_for(&rows, "CLICK", Some("Close")), Some(-1.1), "a known-bad action reports its value too");
+        assert_eq!(prior_return_for(&rows, "TYPE_TEXT", Some("Search")), None, "the same label under another operation is not it");
+        assert_eq!(prior_return_for(&rows, "CLICK", Some("Book")), None, "an action this page never saw has no value");
+        assert_eq!(prior_return_for(&rows, "DONE", None), None);
+    }
+
+    #[test]
+    fn a_step_carries_the_prior_value_only_when_the_page_had_one() {
+        let step = |prior_return| MoveStep {
+            step: 1,
+            operation: "CLICK".into(),
+            target: Some("Booking".into()),
+            field: None,
+            text: None,
+            confidence: 0.9,
+            goal_met: None,
+            url: "https://www.cinema.example/".into(),
+            page_sig: "cinema.example/#deadbeef".into(),
+            page_changed: true,
+            prior_return,
+            note: None,
+            ms: 10,
+        };
+        let known = serde_json::to_string(&step(Some(-0.8))).unwrap();
+        assert!(known.contains("\"prior_return\":-0.8"), "{known}");
+        let unknown = serde_json::to_string(&step(None)).unwrap();
+        assert!(!unknown.contains("prior_return"), "no history for the action: the field is absent, not null: {unknown}");
+    }
+
+    #[test]
+    fn loading_placeholders_are_dropped_from_the_reported_page_text() {
+        let page = "Cartelera\nCargando\u{2026}\nPoseido 19:00\nLoading...\nDia Ocho 20:40";
+        assert_eq!(drop_loading_lines(page), "Cartelera\nPoseido 19:00\nDia Ocho 20:40", "the placeholder leaves no blank line");
+        assert_eq!(drop_loading_lines("  LOADING  \ncargando"), "", "trimmed and case-insensitive");
+        assert_eq!(drop_loading_lines("cargando…\nloading…\n"), "");
+        assert_eq!(
+            drop_loading_lines("Cargando la cartelera de hoy\nloading 12 results"),
+            "Cargando la cartelera de hoy\nloading 12 results",
+            "only a line that is nothing but the word is a placeholder"
+        );
+        assert_eq!(drop_loading_lines("A\n\nB"), "A\n\nB", "blank lines are page structure");
+    }
+
+    #[test]
     fn loopback_hosts_are_recognized() {
         for u in ["http://127.0.0.1:3000/", "http://localhost:5173/login", "http://[::1]:8080/", "http://app.localhost/"] {
             assert!(is_loopback_host(u), "{u}");
@@ -1224,6 +1383,7 @@ mod tests {
             url: String::new(),
             page_sig: String::new(),
             page_changed: true,
+            prior_return: None,
             note: None,
             ms: 5,
         };
@@ -1275,6 +1435,7 @@ mod tests {
             url: "https://www.github.com/search".into(),
             page_sig: "github.com/search#deadbeef".into(),
             page_changed: true,
+            prior_return: Some(-0.35),
             note: None,
             ms: 12,
         };
@@ -1348,7 +1509,17 @@ mod tests {
         let mut values = BTreeMap::new();
         values.insert("email".to_string(), "dev@example.test".to_string());
         values.insert("password".to_string(), "s3cr3t".to_string());
-        let a = MoveArgs { goal: "sign in".into(), steps: 8, values, url: None, allow_remote: false, no_text_helper: true, hints_dir: None };
+        let a = MoveArgs {
+            goal: "sign in".into(),
+            steps: 8,
+            values,
+            url: None,
+            allow_remote: false,
+            no_text_helper: true,
+            hints_dir: None,
+            // Never read the operator's real episode log from a test.
+            no_priors: true,
+        };
         let report = run_loop(&mut cdp, &judge, None, &a);
         let text = serde_json::to_string(&report).unwrap();
         eprintln!("{text}");

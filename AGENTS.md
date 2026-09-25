@@ -78,13 +78,17 @@ remounts, network/stream causation), MUST use Mini's own debug mode:
 3. To act, run `mini --move`. Do NOT `page.click` the first submit — on a
    page with a search box and a login form that hits the wrong form. Pass the
    goal and values as stdin JSON (`{"goal", "values": {name: value}, "steps",
-   "url"}`) so secrets stay off the command line. Values match on the field's
+   `url`}) so secrets stay off the command line. Values match on the field's
    `name`, then input type, then label. Password fields are offered only in
-   `--move`; their contents are never read.
+   `--move`; their contents are never read. `--no-priors` asks Jev with no
+   action values from earlier runs on this host.
 4. Result: one JSON line on stdout, same object in
    `%LOCALAPPDATA%\Mini\Debug\move.json` (`ok`, `stop`, `steps[]` with the
    field NAME typed, never the value, plus `episode_id` for the log in 6).
-   `ok` is the model's DONE — verify.
+   `steps[].prior_return` is the discounted value earlier runs gave the action
+   that step took — absent when this page has no history. `page_text` is read
+   after the page stops changing (max 5 s) with lines that are only a loading
+   word (`Cargando…`) dropped. `ok` is the model's DONE — verify.
 5. Loopback only unless `--allow-remote`. `--qa` policy is unchanged and is
    not used by `--move`.
 6. Every run is also appended to the episode log
@@ -94,7 +98,10 @@ remounts, network/stream causation), MUST use Mini's own debug mode:
    `steps[].page_sig` is the page fingerprint of the page the step started on
    (`<host><path-pattern>#<hash8>`): same page across runs, digits/prices/
    showtimes ignored. Logging is best effort — a failure prints one line to
-   stderr and leaves the run's exit code alone.
+   stderr and leaves the run's exit code alone. `--move` reads that log back:
+   a step on a page with history sends Jev `past_runs` (`operation`, `target`,
+   `n`, `mean_return`, `exact`) — the discounted value of each action — so a
+   known-good path is preferred over a known-wasted click.
 7. Label the episode once you have read the result; the operator is the
    reward signal. Neither command opens a window or calls Jev:
    - `mini --feedback good|bad ["reason"] [--id ID]` → the updated episode
