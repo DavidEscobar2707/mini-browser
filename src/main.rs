@@ -7,6 +7,7 @@ mod analyze;
 mod qa;
 mod cdp;
 mod move_cmd;
+mod episodes;
 mod text_helper;
 
 use crate::qa::Browser;
