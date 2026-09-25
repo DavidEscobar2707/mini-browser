@@ -384,6 +384,12 @@ fn main() {
     if let Some(i) = args.iter().position(|a| a == "--move") {
         std::process::exit(move_cmd::run(&args, i));
     }
+    if let Some(i) = args.iter().position(|a| a == "--desk") {
+        std::process::exit(desk::run::run(&args, i));
+    }
+    if let Some(i) = args.iter().position(|a| a == "--desk-observe") {
+        std::process::exit(desk::run::observe(&args, i));
+    }
 
     // An explicit `--debug` (or `MINI_DEBUG`) launch re-execs itself detached
     // from this process's console/job, then waits for the child to publish

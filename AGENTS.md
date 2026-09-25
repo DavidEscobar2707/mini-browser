@@ -140,3 +140,28 @@ any of the injected JS (`DEBUG_RECORDER_SCRIPT`, `tools/qa-*.js`).
 - `mini --feedback good|bad "reason" [--id ID]` labels an episode. A bad label removes its route from replay.
 - `mini --episodes [host]` shows stats; `mini --learn [host] [--write]` writes the learned block into
   `%LOCALAPPDATA%\Mini\hints\<host>.md` (between `<!-- mini:learned -->` markers; other lines untouched).
+
+# Desktop apps: `mini --desk`
+
+The `--move` loop (Jev picks the control, one evidence gate for `ok`, episodes,
+priors) on a native Windows app, driven through one long-lived `cua-driver mcp`
+session over its UIA tree. Contract: `plans/009-desktop-move.md`.
+
+```
+target\debug\mini.exe --desk --app <name> [--window <title part>] [--launch] --goal "..." [--steps N] [--value name=value]... [--allow-writes] [--hints DIR]
+target\debug\mini.exe --desk-observe --app <name> [--window <title part>]
+```
+
+- `--steps` default 15, max 40. Exit 0 goal reached, 1 stopped without it, 2 could not run.
+- Result: one JSON line on stdout (a `MoveReport`, `url_before`/`url_after` are
+  `desk://<app>/<title>`), also written to `%LOCALAPPDATA%\Mini\Debug\desk.json`.
+  Episodes go to `%LOCALAPPDATA%\Mini\episodes\desk-<app>.jsonl`; hints are
+  `desk-<app>.md` in the hints folder.
+- Every string is redacted before Jev, stdout or the log see it; password-like
+  fields are dropped. Controls that write/send/pay/delete are never offered
+  unless `--allow-writes`. No text helper: TYPE_TEXT only fills `--value` names.
+- Refused windows (exit 2): editors, password managers, mail/chat, terminals,
+  banks and browsers (web pages go to `--move`). Never observe Notepad: its UIA
+  tree exposed secrets in the spike.
+- A `stale_element_token` refusal gets one re-observe and one retry of the same
+  control, never a second.

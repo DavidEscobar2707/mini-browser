@@ -25,8 +25,8 @@ use std::time::{Duration, Instant};
 const DEFAULT_STEPS: usize = 20;
 /// jev-ultrafast's action budget.
 const MAX_STEPS: usize = 60;
-const WALL_CLOCK: Duration = Duration::from_secs(180);
-const NO_CHANGE_LIMIT: usize = 3;
+pub(crate) const WALL_CLOCK: Duration = Duration::from_secs(180);
+pub(crate) const NO_CHANGE_LIMIT: usize = 3;
 /// Per-evaluation deadline while observing; a miss marks the page stale.
 const EVAL_TIMEOUT: Duration = Duration::from_secs(4);
 /// Total time one observation may retry a stale page (navigation, redirects).
@@ -377,13 +377,13 @@ const ANIMATIONS_SETTLED: &str = "new Promise(resolve => { const end = performan
       a.effect && a.effect.getTiming().iterations !== Infinity); \
     const tick = () => (!busy() || performance.now() > end) ? resolve(true) : requestAnimationFrame(tick); tick(); })";
 
-fn page_changed(before: &Observation, after: &Observation) -> bool {
+pub(crate) fn page_changed(before: &Observation, after: &Observation) -> bool {
     before.url != after.url || before.marker != after.marker
 }
 
 /// The controls a snapshot offers, in DOM order: the episode log's page
 /// fingerprint input (`episodes::page_signature`).
-fn control_labels(actions: &[ObservedElement]) -> Vec<String> {
+pub(crate) fn control_labels(actions: &[ObservedElement]) -> Vec<String> {
     actions.iter().map(|el| el.label.clone()).collect()
 }
 
@@ -399,12 +399,12 @@ fn resolve<'a>(key: &str, candidates: &'a [ObservedElement]) -> Option<&'a Obser
 }
 
 /// One decision: operation + resolved target from a single Jev request.
-struct Decision {
-    operation: String,
-    confidence: f64,
-    target: Option<ObservedElement>,
+pub(crate) struct Decision {
+    pub(crate) operation: String,
+    pub(crate) confidence: f64,
+    pub(crate) target: Option<ObservedElement>,
     /// P(the current page, whole text included, already satisfies the goal).
-    goal_met: Option<f64>,
+    pub(crate) goal_met: Option<f64>,
 }
 
 /// Same-request goal check. Asked every step so a page that already answers
@@ -480,13 +480,13 @@ fn unused_search_field<'a>(candidates: &'a [ObservedElement], history: &[StepRec
         })
 }
 
-fn add_goal_check(question: &mut Value, goal: &str) {
+pub(crate) fn add_goal_check(question: &mut Value, goal: &str) {
     if let Some(q) = question["questions"].as_object_mut() {
         q.insert("goal_met".into(), json!({ "type": "noul", "instructions": { "goal": goal, "rules": GOAL_MET } }));
     }
 }
 
-fn decide(judge: &dyn Judge, question: &Value, candidates: &[ObservedElement]) -> Result<Decision, String> {
+pub(crate) fn decide(judge: &dyn Judge, question: &Value, candidates: &[ObservedElement]) -> Result<Decision, String> {
     let body = json!({ "state": question["state"], "questions": question["questions"] });
     let answers = judge.answers(&body)?;
     let op_q = &question["questions"]["operation"];
@@ -718,7 +718,7 @@ fn offer_enter(question: &mut Value, history: &[StepRecord], steps: &[MoveStep],
     }
 }
 
-fn add_site_notes(question: &mut Value, notes: &str) {
+pub(crate) fn add_site_notes(question: &mut Value, notes: &str) {
     if let Some(qs) = question["questions"].as_object_mut() {
         for (name, q) in qs.iter_mut() {
             if name != "goal_met" {
@@ -940,7 +940,7 @@ fn move_json_path() -> std::path::PathBuf {
 
 /// Prior rows offered for one page: enough to cover its controls without
 /// burying the elements table in history.
-const PRIORS_PER_PAGE: usize = 12;
+pub(crate) const PRIORS_PER_PAGE: usize = 12;
 
 /// The action values this page's earlier runs earned, as the `past_runs` state
 /// Jev reads. `None` when there is nothing to say: an empty array would read
@@ -1696,7 +1696,7 @@ fn log_episode(report: &mut MoveReport, goal: &str) {
 /// on, whether it changed, and Jev's goal check for that page. The automatic
 /// scroll-throughs stay out: they are not actions, so they must not become an
 /// episode step, a "helps" bullet (`--learn`) or a replayable route step.
-fn raw_steps(steps: &[MoveStep]) -> Vec<episodes::RawStep> {
+pub(crate) fn raw_steps(steps: &[MoveStep]) -> Vec<episodes::RawStep> {
     steps
         .iter()
         .filter(|s| counts_as_action(&s.operation))

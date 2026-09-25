@@ -68,6 +68,8 @@ Jev without any of it. `page_text` in the result is read once the page stops
 changing (max 5 s), with lines that are only a loading word (`Cargando…`,
 `Loading…`) dropped.
 
+`mini --desk --app Calculator --launch --goal "..."` runs the same loop on a native Windows app through cua-driver (see AGENTS.md, "Desktop apps").
+
 ## Episodes and feedback
 
 Every `--move` run is appended to `%LOCALAPPDATA%\Mini\episodes\<host>.jsonl`
