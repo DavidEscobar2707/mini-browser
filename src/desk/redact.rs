@@ -4,7 +4,10 @@
 const MASK: &str = "[redacted]";
 
 /// Words whose following word is a secret when a `:`, `=` or space follows them.
-const KEYWORDS: &[&str] = &["api key", "apikey", "password", "passwd", "secret", "token", "pass", "pwd", "key"];
+const KEYWORDS: &[&str] = &[
+    "api key", "apikey", "password", "passwd", "contraseña", "clave", "database", "secret", "token", "pass", "pwd",
+    "key", "db",
+];
 
 /// Mask secret-looking substrings with "[redacted]".
 pub fn redact(text: &str) -> String {
@@ -136,6 +139,13 @@ pub fn is_write_label(label: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn password_after_db_words() {
+        for s in ["shop database Fakepass1", "db: Fakepass1", "clave Fakepass1", "contraseña Fakepass1"] {
+            assert!(masked(s) && !redact(s).contains("Fakepass1"), "not masked: {s}");
+        }
+    }
 
     #[test]
     fn shortened_labels_seen_in_uia() {
