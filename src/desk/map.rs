@@ -129,7 +129,6 @@ mod tests {
     /// GAP: the committed calculator_after_7x12.json is byte-identical to calculator_state.json
     /// except element tokens (it still reads "Display is 0"). Un-ignore once it is recaptured.
     #[test]
-    #[ignore = "fixture GAP: calculator_after_7x12.json does not contain Display is 84"]
     fn calculator_after_fixture() {
         let (before, _) = observation_from_state(&fixture("calculator_state.json"), "Calculator");
         let (after, _) = observation_from_state(&fixture("calculator_after_7x12.json"), "Calculator");

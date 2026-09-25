@@ -18,7 +18,7 @@ Product intent these plans serve: a coding agent working on a local app keeps on
 | 007 | Search reliability on non-agent-first sites + no scroll oscillation | P1 | M | 006 | DONE (bench 7/12 -> 9/12) |
 | 008 | No false success, opener that fires, fair goal check | P1 | S | 007 | IN PROGRESS |
 
-| 009 | Desktop move: Jev picks the control in native apps (`mini --desk`) | P1 | L | 008 | IN PROGRESS |
+| 009 | Desktop move: Jev picks the control in native apps (`mini --desk`) | P1 | L | 008 | DONE (live: Calculator 7x12=84, 6 Jev calls, 17 s; Settings Bluetooth, 2 calls) |
 
 Status values: TODO | IN PROGRESS | DONE | BLOCKED (with one-line reason) | REJECTED (with one-line rationale — finding fixed independently or approach abandoned)
 

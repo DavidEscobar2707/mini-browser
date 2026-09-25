@@ -88,7 +88,14 @@ fn secret_segment(s: &str) -> bool {
     let slack = s.len() > 5 && s.starts_with("xox") && matches!(s.as_bytes()[3], b'a' | b'b' | b'p' | b'r') && s.as_bytes()[4] == b'-';
     let aws = s.len() == 20 && s.starts_with("AKIA") && s[4..].chars().all(|c| c.is_ascii_uppercase() || c.is_ascii_digit());
     let long_mixed = s.len() >= 24 && s.chars().any(|c| c.is_ascii_alphabetic()) && s.chars().any(|c| c.is_ascii_digit());
-    prefixed || after("AIza", 20) || slack || aws || long_mixed
+    // UIA shortens long labels ("sk_liv...ZXZy", "AIzaSyDQ..."): a key prefix alone is enough.
+    let short_prefix = ["sk_liv", "sk_tes", "rk_liv", "pk_liv", "sk-pro", "sk-or-", "sk-ant", "ghp_", "gho_", "github_pat"]
+        .iter()
+        .any(|p| s.starts_with(p));
+    let hex_or_id = s.len() >= 16 && s.chars().any(|c| c.is_ascii_alphabetic()) && s.chars().any(|c| c.is_ascii_digit())
+        && s.chars().all(|c| c.is_ascii_alphanumeric())
+        && s.chars().filter(|c| c.is_ascii_digit()).count() >= 3;
+    prefixed || after("AIza", 8) || short_prefix || slack || aws || long_mixed || hex_or_id
 }
 
 /// Lowercased alphanumeric words of `s`.
@@ -130,6 +137,24 @@ pub fn is_write_label(label: &str) -> bool {
 mod tests {
     use super::*;
 
+    #[test]
+    fn shortened_labels_seen_in_uia() {
+        // Shapes copied from a real UIA spike; every value here is FAKE.
+        for s in [
+            "Stripe sk_liv...QQzz",
+            "sk-pro...AbCd",
+            "sk-or-...9999",
+            "gemini FAKEUSER AIzaSyFAKE123fake",
+            "deepgram 0f0f0f0f0f0f0f0f0f0fab",
+            "api key FAKEfake123FAKEfake",
+        ] {
+            assert!(masked(s), "not masked: {s}");
+        }
+        for s in ["Display is 84", "Calculator", "Multiply by", "Bluetooth & devices", "Windows 11 version 24H2"] {
+            assert!(!masked(s), "false positive: {s}");
+        }
+    }
+
     fn masked(s: &str) -> bool {
         redact(s).contains(MASK)
     }
@@ -149,7 +174,9 @@ mod tests {
             assert!(masked(s), "{s}");
             assert!(!redact(s).contains("FAKEFAKE"), "{s}");
         }
-        for s in ["sk-1234", "task-list", "ghp_abc", "gho_"] {
+        // A bare key prefix ("ghp_abc") is masked on purpose: UIA shortens long labels.
+        assert!(masked("ghp_abc"));
+        for s in ["sk-1234", "task-list"] {
             assert_eq!(redact(s), s);
         }
     }

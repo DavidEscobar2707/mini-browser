@@ -1,6 +1,6 @@
 # 009 - Desktop move: Jev picks the control in native apps (`mini --desk`)
 
-Status: IN PROGRESS (herdr workers `desk-core`, `desk-loop`). Depends on 008.
+Status: DONE. Merged desk/core + desk/loop; 278 tests. Live: Calculator 7x12 ok (5 Jev clicks, 17 s), Settings Bluetooth ok, Notepad and PowerShell refused (exit 2, nothing printed).
 Baseline on main before this plan: 254 passed, 2 ignored (`tools\win-cargo.cmd test`).
 
 ## Why

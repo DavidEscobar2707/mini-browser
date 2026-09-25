@@ -1,7 +1,7 @@
 {
  "_note": "Prefer `elements` \u2014 `tree_markdown` will continue to work but new fields will only be added to the structured side. Issue #22865: use `max_elements` / `max_depth` to bound the UIA walk on apps with very large trees.",
  "app_name": "ApplicationFrameHost.exe",
- "element_count": 42,
+ "element_count": 44,
  "elements": [
   {
    "actions": [
@@ -9,7 +9,7 @@
    ],
    "depth": 1,
    "element_index": 0,
-   "element_token": "s00000003:0",
+   "element_token": "s00000001:0",
    "enabled": true,
    "frame": {
     "h": 40,
@@ -27,7 +27,7 @@
    ],
    "depth": 3,
    "element_index": 1,
-   "element_token": "s00000003:1",
+   "element_token": "s00000001:1",
    "enabled": true,
    "label": "System",
    "parent_index": 0,
@@ -39,7 +39,7 @@
    ],
    "depth": 2,
    "element_index": 2,
-   "element_token": "s00000003:2",
+   "element_token": "s00000001:2",
    "enabled": true,
    "frame": {
     "h": 40,
@@ -57,7 +57,7 @@
    ],
    "depth": 2,
    "element_index": 3,
-   "element_token": "s00000003:3",
+   "element_token": "s00000001:3",
    "enabled": true,
    "frame": {
     "h": 40,
@@ -75,7 +75,7 @@
    ],
    "depth": 2,
    "element_index": 4,
-   "element_token": "s00000003:4",
+   "element_token": "s00000001:4",
    "enabled": true,
    "frame": {
     "h": 40,
@@ -93,7 +93,7 @@
    ],
    "depth": 2,
    "element_index": 5,
-   "element_token": "s00000003:5",
+   "element_token": "s00000001:5",
    "enabled": true,
    "frame": {
     "h": 20,
@@ -110,7 +110,7 @@
    ],
    "depth": 3,
    "element_index": 6,
-   "element_token": "s00000003:6",
+   "element_token": "s00000001:6",
    "enabled": true,
    "frame": {
     "h": 45,
@@ -127,7 +127,7 @@
    ],
    "depth": 4,
    "element_index": 7,
-   "element_token": "s00000003:7",
+   "element_token": "s00000001:7",
    "enabled": true,
    "label": "PaneTitleTextBlock",
    "parent_index": 6,
@@ -139,7 +139,7 @@
    ],
    "depth": 4,
    "element_index": 8,
-   "element_token": "s00000003:8",
+   "element_token": "s00000001:8",
    "enabled": true,
    "frame": {
     "h": 173,
@@ -147,7 +147,7 @@
     "x": 0,
     "y": 153
    },
-   "label": "Display is 0",
+   "label": "Display is 84",
    "role": "Text"
   },
   {
@@ -156,7 +156,7 @@
    ],
    "depth": 5,
    "element_index": 9,
-   "element_token": "s00000003:9",
+   "element_token": "s00000001:9",
    "enabled": true,
    "frame": {
     "h": 73,
@@ -173,7 +173,7 @@
    ],
    "depth": 5,
    "element_index": 10,
-   "element_token": "s00000003:10",
+   "element_token": "s00000001:10",
    "enabled": true,
    "frame": {
     "h": 73,
@@ -190,7 +190,7 @@
    ],
    "depth": 5,
    "element_index": 11,
-   "element_token": "s00000003:11",
+   "element_token": "s00000001:11",
    "enabled": true,
    "frame": {
     "h": 73,
@@ -207,7 +207,7 @@
    ],
    "depth": 5,
    "element_index": 12,
-   "element_token": "s00000003:12",
+   "element_token": "s00000001:12",
    "enabled": true,
    "frame": {
     "h": 119,
@@ -224,7 +224,7 @@
    ],
    "depth": 5,
    "element_index": 13,
-   "element_token": "s00000003:13",
+   "element_token": "s00000001:13",
    "enabled": true,
    "frame": {
     "h": 119,
@@ -241,7 +241,7 @@
    ],
    "depth": 5,
    "element_index": 14,
-   "element_token": "s00000003:14",
+   "element_token": "s00000001:14",
    "enabled": true,
    "frame": {
     "h": 119,
@@ -258,7 +258,7 @@
    ],
    "depth": 5,
    "element_index": 15,
-   "element_token": "s00000003:15",
+   "element_token": "s00000001:15",
    "enabled": true,
    "frame": {
     "h": 119,
@@ -275,7 +275,7 @@
    ],
    "depth": 5,
    "element_index": 16,
-   "element_token": "s00000003:16",
+   "element_token": "s00000001:16",
    "enabled": true,
    "frame": {
     "h": 119,
@@ -292,7 +292,7 @@
    ],
    "depth": 5,
    "element_index": 17,
-   "element_token": "s00000003:17",
+   "element_token": "s00000001:17",
    "enabled": true,
    "frame": {
     "h": 119,
@@ -309,7 +309,7 @@
    ],
    "depth": 5,
    "element_index": 18,
-   "element_token": "s00000003:18",
+   "element_token": "s00000001:18",
    "enabled": true,
    "frame": {
     "h": 119,
@@ -326,7 +326,7 @@
    ],
    "depth": 5,
    "element_index": 19,
-   "element_token": "s00000003:19",
+   "element_token": "s00000001:19",
    "enabled": true,
    "frame": {
     "h": 119,
@@ -343,7 +343,7 @@
    ],
    "depth": 5,
    "element_index": 20,
-   "element_token": "s00000003:20",
+   "element_token": "s00000001:20",
    "enabled": true,
    "frame": {
     "h": 121,
@@ -360,7 +360,7 @@
    ],
    "depth": 5,
    "element_index": 21,
-   "element_token": "s00000003:21",
+   "element_token": "s00000001:21",
    "enabled": true,
    "frame": {
     "h": 119,
@@ -377,7 +377,7 @@
    ],
    "depth": 5,
    "element_index": 22,
-   "element_token": "s00000003:22",
+   "element_token": "s00000001:22",
    "enabled": true,
    "frame": {
     "h": 121,
@@ -394,7 +394,7 @@
    ],
    "depth": 5,
    "element_index": 23,
-   "element_token": "s00000003:23",
+   "element_token": "s00000001:23",
    "enabled": true,
    "frame": {
     "h": 118,
@@ -411,7 +411,7 @@
    ],
    "depth": 5,
    "element_index": 24,
-   "element_token": "s00000003:24",
+   "element_token": "s00000001:24",
    "enabled": true,
    "frame": {
     "h": 118,
@@ -428,7 +428,7 @@
    ],
    "depth": 5,
    "element_index": 25,
-   "element_token": "s00000003:25",
+   "element_token": "s00000001:25",
    "enabled": true,
    "frame": {
     "h": 121,
@@ -445,7 +445,7 @@
    ],
    "depth": 5,
    "element_index": 26,
-   "element_token": "s00000003:26",
+   "element_token": "s00000001:26",
    "enabled": true,
    "frame": {
     "h": 121,
@@ -462,7 +462,7 @@
    ],
    "depth": 5,
    "element_index": 27,
-   "element_token": "s00000003:27",
+   "element_token": "s00000001:27",
    "enabled": true,
    "frame": {
     "h": 121,
@@ -479,7 +479,7 @@
    ],
    "depth": 5,
    "element_index": 28,
-   "element_token": "s00000003:28",
+   "element_token": "s00000001:28",
    "enabled": true,
    "frame": {
     "h": 118,
@@ -496,7 +496,7 @@
    ],
    "depth": 5,
    "element_index": 29,
-   "element_token": "s00000003:29",
+   "element_token": "s00000001:29",
    "enabled": true,
    "frame": {
     "h": 118,
@@ -513,7 +513,7 @@
    ],
    "depth": 5,
    "element_index": 30,
-   "element_token": "s00000003:30",
+   "element_token": "s00000001:30",
    "enabled": true,
    "frame": {
     "h": 118,
@@ -530,7 +530,7 @@
    ],
    "depth": 5,
    "element_index": 31,
-   "element_token": "s00000003:31",
+   "element_token": "s00000001:31",
    "enabled": true,
    "frame": {
     "h": 121,
@@ -547,7 +547,7 @@
    ],
    "depth": 5,
    "element_index": 32,
-   "element_token": "s00000003:32",
+   "element_token": "s00000001:32",
    "enabled": true,
    "frame": {
     "h": 121,
@@ -564,7 +564,7 @@
    ],
    "depth": 5,
    "element_index": 33,
-   "element_token": "s00000003:33",
+   "element_token": "s00000001:33",
    "enabled": true,
    "frame": {
     "h": 121,
@@ -581,7 +581,7 @@
    ],
    "depth": 5,
    "element_index": 34,
-   "element_token": "s00000003:34",
+   "element_token": "s00000001:34",
    "enabled": true,
    "frame": {
     "h": 118,
@@ -598,7 +598,7 @@
    ],
    "depth": 4,
    "element_index": 35,
-   "element_token": "s00000003:35",
+   "element_token": "s00000001:35",
    "enabled": true,
    "frame": {
     "h": 118,
@@ -615,7 +615,7 @@
    ],
    "depth": 5,
    "element_index": 36,
-   "element_token": "s00000003:36",
+   "element_token": "s00000001:36",
    "enabled": true,
    "frame": {
     "h": 1104,
@@ -632,7 +632,7 @@
    ],
    "depth": 6,
    "element_index": 37,
-   "element_token": "s00000003:37",
+   "element_token": "s00000001:37",
    "enabled": true,
    "frame": {
     "h": 60,
@@ -640,36 +640,72 @@
     "x": 1520,
     "y": 36
    },
-   "label": "There\u2019s no history yet. History",
+   "label": "History",
    "parent_index": 36,
    "role": "TabItem",
    "selected": true
   },
   {
    "actions": [
-    "text"
+    "scroll"
    ],
    "depth": 7,
    "element_index": 38,
-   "element_token": "s00000003:38",
+   "element_token": "s00000001:38",
    "enabled": true,
    "frame": {
-    "h": 1021,
-    "w": 355,
-    "x": 1535,
-    "y": 119
+    "h": 972,
+    "w": 390,
+    "x": 1525,
+    "y": 109
    },
-   "label": "There\u2019s no history yet.",
+   "label": "HistoryListView",
    "parent_index": 37,
-   "role": "Text"
+   "role": "List"
+  },
+  {
+   "actions": [
+    "invoke"
+   ],
+   "depth": 8,
+   "element_index": 39,
+   "element_token": "s00000001:39",
+   "enabled": true,
+   "frame": {
+    "h": 78,
+    "w": 390,
+    "x": 1525,
+    "y": 109
+   },
+   "label": "7 \u00d7 12= 84",
+   "parent_index": 38,
+   "role": "ListItem"
+  },
+  {
+   "actions": [
+    "invoke"
+   ],
+   "depth": 7,
+   "element_index": 40,
+   "element_token": "s00000001:40",
+   "enabled": true,
+   "frame": {
+    "h": 40,
+    "w": 40,
+    "x": 1870,
+    "y": 1091
+   },
+   "label": "Clear all history",
+   "parent_index": 37,
+   "role": "Button"
   },
   {
    "actions": [
     "select"
    ],
    "depth": 6,
-   "element_index": 39,
-   "element_token": "s00000003:39",
+   "element_index": 41,
+   "element_token": "s00000001:41",
    "enabled": true,
    "frame": {
     "h": 60,
@@ -687,8 +723,8 @@
     "text"
    ],
    "depth": 3,
-   "element_index": 40,
-   "element_token": "s00000003:40",
+   "element_index": 42,
+   "element_token": "s00000001:42",
    "enabled": true,
    "frame": {
     "h": 34,
@@ -704,8 +740,8 @@
     "invoke"
    ],
    "depth": 3,
-   "element_index": 41,
-   "element_token": "s00000003:41",
+   "element_index": 43,
+   "element_token": "s00000001:43",
    "enabled": true,
    "frame": {
     "h": 40,
@@ -719,13 +755,13 @@
  ],
  "elements_complete": false,
  "nodes_pending": 0,
- "nodes_visited": 57,
+ "nodes_visited": 60,
  "pid": 9580,
- "returned_element_count": 42,
- "snapshot_id": "s00000003",
+ "returned_element_count": 44,
+ "snapshot_id": "s00000001",
  "timeout_ms": 1000,
- "total_element_count": 42,
- "tree_markdown": "- Window \"Calculator\"\n  - [0] Window \"Calculator\" [value=\"Calculator\" id=TitleBar actions=[set_value]]\n    - MenuBar \"System\"\n      - [1] MenuItem \"System\" [actions=[expand]]\n    - [2] Button \"Minimise Calculator\" [id=Minimize actions=[invoke]]\n    - [3] Button \"Restore Calculator\" [id=Maximize actions=[invoke]]\n    - [4] Button \"Close Calculator\" [id=Close actions=[invoke]]\n  - Window \"Calculator\"\n    - [5] Text \"Calculator\" [id=AppName actions=[text]]\n      - [6] Button \"Open Navigation\" [id=TogglePaneButton actions=[invoke]]\n        - [7] Text [id=PaneTitleTextBlock actions=[text]]\n        - Text \"Expression is \"\n        - [8] Text \"Display is 0\" [id=CalculatorResults actions=[invoke]]\n        - Group \"Memory controls\"\n          - Button \"Clear all memory\"\n          - Button \"Memory recall\"\n          - [9] Button \"Memory add\" [id=MemPlus actions=[invoke]]\n          - [10] Button \"Memory subtract\" [id=MemMinus actions=[invoke]]\n          - [11] Button \"Memory store\" [id=memButton actions=[invoke]]\n        - Group \"Display controls\"\n          - [12] Button \"Percent\" [id=percentButton actions=[invoke]]\n          - [13] Button \"Clear entry\" [id=clearEntryButton actions=[invoke]]\n          - [14] Button \"Clear\" [id=clearButton actions=[invoke]]\n          - [15] Button \"Backspace\" [id=backSpaceButton actions=[invoke]]\n        - Group \"Standard functions\"\n          - [16] Button \"Reciprocal\" [id=invertButton actions=[invoke]]\n          - [17] Button \"Square\" [id=xpower2Button actions=[invoke]]\n          - [18] Button \"Square root\" [id=squareRootButton actions=[invoke]]\n        - Group \"Standard operators\"\n          - [19] Button \"Divide by\" [id=divideButton actions=[invoke]]\n          - [20] Button \"Multiply by\" [id=multiplyButton actions=[invoke]]\n          - [21] Button \"Minus\" [id=minusButton actions=[invoke]]\n          - [22] Button \"Plus\" [id=plusButton actions=[invoke]]\n          - [23] Button \"Equals\" [id=equalButton actions=[invoke]]\n        - Group \"Number pad\"\n          - [24] Button \"Zero\" [id=num0Button actions=[invoke]]\n          - [25] Button \"One\" [id=num1Button actions=[invoke]]\n          - [26] Button \"Two\" [id=num2Button actions=[invoke]]\n          - [27] Button \"Three\" [id=num3Button actions=[invoke]]\n          - [28] Button \"Four\" [id=num4Button actions=[invoke]]\n          - [29] Button \"Five\" [id=num5Button actions=[invoke]]\n          - [30] Button \"Six\" [id=num6Button actions=[invoke]]\n          - [31] Button \"Seven\" [id=num7Button actions=[invoke]]\n          - [32] Button \"Eight\" [id=num8Button actions=[invoke]]\n          - [33] Button \"Nine\" [id=num9Button actions=[invoke]]\n          - [34] Button \"Decimal separator\" [id=decimalSeparatorButton actions=[invoke]]\n        - [35] Button \"Positive negative\" [id=negateButton actions=[invoke]]\n        - Group \"History and Memory lists\"\n          - [36] Tab [id=DockPivot actions=[scroll]]\n            - [37] TabItem \"There\u2019s no history yet. History\" [id=HistoryLabel actions=[select]]\n              - [38] Text \"There\u2019s no history yet.\" [id=HistoryEmpty actions=[text]]\n            - [39] TabItem \"There\u2019s nothing saved in memory. Memory\" [id=MemoryLabel actions=[select]]\n      - [40] Text \"Standard Calculator mode\" [id=Header actions=[text]]\n      - [41] Button \"Keep on top\" [id=NormalAlwaysOnTopButton actions=[invoke]]\n",
+ "total_element_count": 44,
+ "tree_markdown": "- Window \"Calculator\"\n  - [0] Window \"Calculator\" [value=\"Calculator\" id=TitleBar actions=[set_value]]\n    - MenuBar \"System\"\n      - [1] MenuItem \"System\" [actions=[expand]]\n    - [2] Button \"Minimise Calculator\" [id=Minimize actions=[invoke]]\n    - [3] Button \"Restore Calculator\" [id=Maximize actions=[invoke]]\n    - [4] Button \"Close Calculator\" [id=Close actions=[invoke]]\n  - Window \"Calculator\"\n    - [5] Text \"Calculator\" [id=AppName actions=[text]]\n      - [6] Button \"Open Navigation\" [id=TogglePaneButton actions=[invoke]]\n        - [7] Text [id=PaneTitleTextBlock actions=[text]]\n        - Text \"Expression is 7 \u00d7 12=\"\n        - [8] Text \"Display is 84\" [id=CalculatorResults actions=[invoke]]\n        - Group \"Memory controls\"\n          - Button \"Clear all memory\"\n          - Button \"Memory recall\"\n          - [9] Button \"Memory add\" [id=MemPlus actions=[invoke]]\n          - [10] Button \"Memory subtract\" [id=MemMinus actions=[invoke]]\n          - [11] Button \"Memory store\" [id=memButton actions=[invoke]]\n        - Group \"Display controls\"\n          - [12] Button \"Percent\" [id=percentButton actions=[invoke]]\n          - [13] Button \"Clear entry\" [id=clearEntryButton actions=[invoke]]\n          - [14] Button \"Clear\" [id=clearButton actions=[invoke]]\n          - [15] Button \"Backspace\" [id=backSpaceButton actions=[invoke]]\n        - Group \"Standard functions\"\n          - [16] Button \"Reciprocal\" [id=invertButton actions=[invoke]]\n          - [17] Button \"Square\" [id=xpower2Button actions=[invoke]]\n          - [18] Button \"Square root\" [id=squareRootButton actions=[invoke]]\n        - Group \"Standard operators\"\n          - [19] Button \"Divide by\" [id=divideButton actions=[invoke]]\n          - [20] Button \"Multiply by\" [id=multiplyButton actions=[invoke]]\n          - [21] Button \"Minus\" [id=minusButton actions=[invoke]]\n          - [22] Button \"Plus\" [id=plusButton actions=[invoke]]\n          - [23] Button \"Equals\" [id=equalButton actions=[invoke]]\n        - Group \"Number pad\"\n          - [24] Button \"Zero\" [id=num0Button actions=[invoke]]\n          - [25] Button \"One\" [id=num1Button actions=[invoke]]\n          - [26] Button \"Two\" [id=num2Button actions=[invoke]]\n          - [27] Button \"Three\" [id=num3Button actions=[invoke]]\n          - [28] Button \"Four\" [id=num4Button actions=[invoke]]\n          - [29] Button \"Five\" [id=num5Button actions=[invoke]]\n          - [30] Button \"Six\" [id=num6Button actions=[invoke]]\n          - [31] Button \"Seven\" [id=num7Button actions=[invoke]]\n          - [32] Button \"Eight\" [id=num8Button actions=[invoke]]\n          - [33] Button \"Nine\" [id=num9Button actions=[invoke]]\n          - [34] Button \"Decimal separator\" [id=decimalSeparatorButton actions=[invoke]]\n        - [35] Button \"Positive negative\" [id=negateButton actions=[invoke]]\n        - Group \"History and Memory lists\"\n          - [36] Tab [id=DockPivot actions=[scroll]]\n            - [37] TabItem \"History\" [id=HistoryLabel actions=[select]]\n              - [38] List [id=HistoryListView actions=[scroll]]\n                - [39] ListItem \"7 \u00d7 12= 84\" [actions=[invoke]]\n                  - Group \"7 \u00d7 12= 84\"\n              - [40] Button \"Clear all history\" [id=ClearHistory actions=[invoke]]\n            - [41] TabItem \"There\u2019s nothing saved in memory. Memory\" [id=MemoryLabel actions=[select]]\n      - [42] Text \"Standard Calculator mode\" [id=Header actions=[text]]\n      - [43] Button \"Keep on top\" [id=NormalAlwaysOnTopButton actions=[invoke]]\n",
  "truncated": false,
  "walk_elapsed_ms": 1,
  "window_bounds": {
@@ -734,6 +770,6 @@
   "x": 0,
   "y": 0
  },
- "window_id": 460848,
+ "window_id": 7342170,
  "window_title": "Calculator"
 }
