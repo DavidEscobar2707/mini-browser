@@ -45,10 +45,14 @@ pub struct MoveArgs {
     /// Do not read the action values earlier runs earned on this host
     /// (`--no-priors`): every step asks Jev with no `past_runs`.
     pub no_priors: bool,
+    /// Do not replay the best known route for this goal (`--no-replay`):
+    /// every step is decided by Jev.
+    pub no_replay: bool,
 }
 
 /// Parses `--move --goal <text> [--steps N] [--value name=value]... [--url U]
-/// [--allow-remote]`, then merges a stdin JSON object when one is piped.
+/// [--allow-remote] [--no-priors] [--no-replay]`, then merges a stdin JSON
+/// object when one is piped.
 pub fn parse_args(args: &[String], stdin_json: Option<&str>) -> Result<MoveArgs, String> {
     let mut out = MoveArgs { steps: DEFAULT_STEPS, ..Default::default() };
     let mut i = 0;
@@ -76,6 +80,7 @@ pub fn parse_args(args: &[String], stdin_json: Option<&str>) -> Result<MoveArgs,
             "--allow-remote" => out.allow_remote = true,
             "--no-text-helper" => out.no_text_helper = true,
             "--no-priors" => out.no_priors = true,
+            "--no-replay" => out.no_replay = true,
             "--hints" => {
                 out.hints_dir = Some(next.ok_or("--hints needs a folder")?.into());
                 i += 1;
@@ -164,6 +169,12 @@ pub struct MoveReport {
     /// absent when logging the episode failed. `mini --feedback` takes it.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub episode_id: Option<String>,
+    /// Id of the episode whose route this run replayed, absent when no route
+    /// was found (or replay was skipped).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub replay_from: Option<String>,
+    /// How many of `steps` replay ran on its own, without asking Jev.
+    pub replayed: usize,
     pub url_before: String,
     pub url_after: String,
     pub judge_calls: u32,
@@ -603,6 +614,20 @@ fn load_whole_page(cdp: &mut Cdp) {
     let _ = cdp.eval_within(SCROLL_THROUGH, Duration::from_secs(15));
 }
 
+/// One observation of the current page, with lazy content loaded the first
+/// time this run reaches that URL: scrolling through loads results and
+/// showtimes before Jev is asked to judge the page. Only on a new URL —
+/// scrolling would close an open drop-down on the current one. Replay and the
+/// Jev loop share one set of visited URLs, so a page is never scrolled twice.
+fn loaded_snapshot(cdp: &mut Cdp, loaded: &mut std::collections::HashSet<String>) -> Result<Observation, String> {
+    let before = snapshot(cdp)?;
+    if !loaded.insert(before.url.clone()) {
+        return Ok(before);
+    }
+    load_whole_page(cdp);
+    snapshot(cdp)
+}
+
 /// How long the whole-page text must hold its length before the report calls
 /// it final, and how long the wait may last.
 const PAGE_SETTLE: Duration = Duration::from_millis(400);
@@ -678,6 +703,171 @@ fn load_priors(a: &MoveArgs, url_before: &str) -> episodes::PriorTable {
     episodes::PriorTable::load(None, &episode_host(url_before))
 }
 
+// ---- RL phase 3 (plans/006-route-replay-and-learn.md): route replay. ----
+
+/// A replayed step was decided by an earlier run's log, not by a fresh Jev
+/// answer: `confidence` is not a model number there, it is "the route says so".
+const REPLAY_CONFIDENCE: f64 = 1.0;
+
+/// The name of a control: the ` → ` suffix the snapshot appends says where the
+/// control goes, it is not part of the label — the same rule `LoopGuard` keys
+/// a control by, so a route step finds its control again.
+fn label_head(label: &str) -> &str {
+    label.split(" \u{2192} ").next().unwrap_or(label).trim()
+}
+
+/// The candidate a CLICK route step names, matched on the label head. `None`
+/// when this page no longer offers that control: replay stops there instead of
+/// clicking whatever else looks close.
+fn clicked_for_step<'a>(candidates: &'a [ObservedElement], step: &episodes::RouteStep) -> Option<&'a ObservedElement> {
+    let want = label_head(step.target.as_deref()?);
+    candidates
+        .iter()
+        .find(|el| matches!(el.kind.as_str(), "click" | "fill" | "select") && label_head(&el.label) == want)
+}
+
+/// Whether the live page is the one a route step ran on: the path part of the
+/// signature matches (the hash moves when a menu opens, the path does not),
+/// and a step that names a control still finds it.
+pub fn route_step_matches(current_sig: &str, label_found: bool, step: &episodes::RouteStep) -> bool {
+    episodes::path_of_sig(current_sig) == episodes::path_of_sig(&step.page_sig) && (step.target.is_none() || label_found)
+}
+
+/// What replay did: the steps it ran on its own, the episode the route came
+/// from, and — when the route broke — why.
+#[derive(Default)]
+struct Replay {
+    /// Steps replay performed, numbered from 1: the run's first steps.
+    steps: Vec<MoveStep>,
+    /// Id of the episode the route came from, for the report.
+    from: Option<String>,
+    /// `replay stopped at step <k>: <why>`, absent when the route ran to the
+    /// end; the Jev loop then starts on the page replay reached.
+    stopped: Option<String>,
+}
+
+/// Stops replay at route step `k`, keeping the steps already performed.
+fn replay_broke(k: usize, why: String, steps: Vec<MoveStep>) -> Replay {
+    Replay { steps, from: None, stopped: Some(format!("replay stopped at step {k}: {why}")) }
+}
+
+/// Replays a known-good route without asking Jev. Each step observes the page,
+/// checks it is still the page the earlier run acted on, performs the step with
+/// the same code the Jev loop uses (CLICK resolved by label, SCROLL_DOWN,
+/// PRESS_ENTER) and requires the page to change. The first surprise ends
+/// replay; the rest of the route is left to Jev, which starts where replay
+/// stopped and re-checks the goal on the current page.
+///
+/// `a.steps` caps the steps the run may take: replay spends at most all but one
+/// of them, keeping the last for the goal check the Jev loop opens with, so a
+/// full replay costs exactly one Jev call. The `--allow-remote` policy applies
+/// to replay like it does to the loop.
+fn replay_route(
+    cdp: &mut Cdp,
+    a: &MoveArgs,
+    route: &episodes::Route,
+    loaded: &mut std::collections::HashSet<String>,
+) -> Replay {
+    let budget = a.steps.saturating_sub(1);
+    let mut steps: Vec<MoveStep> = Vec::new();
+    for (i, step) in route.steps.iter().enumerate() {
+        let k = i + 1;
+        if i >= budget {
+            return replay_broke(k, format!("step budget of {budget} replayed steps reached"), steps);
+        }
+        let before = match loaded_snapshot(cdp, loaded) {
+            Ok(o) => o,
+            Err(e) => return replay_broke(k, e, steps),
+        };
+        if !a.allow_remote && !is_loopback_host(&before.url) {
+            return replay_broke(k, format!("navigated off loopback to {}", firewall::host_only(&before.url)), steps);
+        }
+        let page_sig = episodes::page_signature(&before.url, &control_labels(&before.actions));
+        let candidates = firewall::dev_candidates(&before.actions);
+        let target = if step.operation == "CLICK" {
+            match clicked_for_step(&candidates, step) {
+                Some(el) => Some(el.clone()),
+                None => {
+                    let want = step.target.as_deref().unwrap_or_default();
+                    return replay_broke(k, format!("no control labelled \"{want}\" on this page"), steps);
+                }
+            }
+        } else {
+            None
+        };
+        if !route_step_matches(&page_sig, target.is_some(), step) {
+            return replay_broke(
+                k,
+                format!(
+                    "the page is {} but the route step ran on {}",
+                    episodes::path_of_sig(&page_sig),
+                    episodes::path_of_sig(&step.page_sig)
+                ),
+                steps,
+            );
+        }
+        if !matches!(step.operation.as_str(), "CLICK" | "SCROLL_DOWN" | "PRESS_ENTER") {
+            return replay_broke(k, format!("{0} is not a replayable operation", step.operation), steps);
+        }
+        let step_started = Instant::now();
+        let decision =
+            Decision { operation: step.operation.clone(), confidence: REPLAY_CONFIDENCE, target, goal_met: None };
+        let refusal = match perform(cdp, &decision, None) {
+            Ok(note) => note,
+            Err(e) => Some(format!("action failed: {e}")),
+        };
+        if let Some(why) = refusal {
+            return replay_broke(k, why, steps);
+        }
+        after_input(cdp, false);
+        let after = snapshot(cdp).unwrap_or_default();
+        let changed = page_changed(&before, &after);
+        steps.push(MoveStep {
+            step: k,
+            operation: decision.operation.clone(),
+            // The label this page offered: what the run really clicked, which
+            // is what the next episode should aggregate the action by.
+            target: decision.target.as_ref().map(|el| el.label.clone()).or_else(|| step.target.clone()),
+            field: None,
+            text: None,
+            confidence: REPLAY_CONFIDENCE,
+            goal_met: None,
+            url: before.url.clone(),
+            page_sig,
+            page_changed: changed,
+            prior_return: None,
+            note: Some("replay".into()),
+            ms: step_started.elapsed().as_millis() as u64,
+        });
+        if !changed {
+            return replay_broke(k, "the page did not change".into(), steps);
+        }
+    }
+    Replay { steps, from: None, stopped: None }
+}
+
+/// Replay reads the episode log, so `--no-priors` skips it along with the
+/// priors; `--no-replay` skips it on its own.
+fn replay_enabled(a: &MoveArgs) -> bool {
+    !a.no_replay && !a.no_priors
+}
+
+/// The route this host already solved for this goal, replayed from the current
+/// page. The goal is matched normalized, so a reworded goal still finds its
+/// route.
+fn replay_for(cdp: &mut Cdp, a: &MoveArgs, url_before: &str, loaded: &mut std::collections::HashSet<String>) -> Replay {
+    if !replay_enabled(a) {
+        return Replay::default();
+    }
+    let eps = episodes::load_episodes(None, &episode_host(url_before));
+    let Some(route) = episodes::best_route(&eps, &episodes::normalize_goal(&a.goal)) else {
+        return Replay::default();
+    };
+    let mut replay = replay_route(cdp, a, &route, loaded);
+    replay.from = (!route.episode_id.is_empty()).then(|| route.episode_id.clone());
+    replay
+}
+
 /// The loop, over the I/O seams, so it can run against a fake judge in tests.
 fn run_loop(cdp: &mut Cdp, judge: &dyn Judge, helper: Option<&TextHelper>, a: &MoveArgs) -> MoveReport {
     let started = Instant::now();
@@ -694,7 +884,8 @@ fn run_loop(cdp: &mut Cdp, judge: &dyn Judge, helper: Option<&TextHelper>, a: &M
     // Page most likely to meet the goal so far: (probability, URL).
     let mut best: Option<(f64, String)> = None;
     let mut done_disputed = 0usize;
-    // URLs already scrolled through once to load lazy content before giving up.
+    // URLs already scrolled through once (`loaded_snapshot`), shared by replay
+    // and the loop so one page is loaded once.
     let mut loaded: std::collections::HashSet<String> = std::collections::HashSet::new();
     // URLs given a second load pass before accepting BLOCKED / no progress.
     let mut reloaded: std::collections::HashSet<String> = std::collections::HashSet::new();
@@ -702,6 +893,12 @@ fn run_loop(cdp: &mut Cdp, judge: &dyn Judge, helper: Option<&TextHelper>, a: &M
     // Action values from earlier runs on this host, read once: every step
     // offers Jev the rows of the page it starts on.
     let priors = load_priors(a, &url_before);
+    // Phase 3: a route this host already solved for this goal, replayed with no
+    // Jev call. Its steps are the run's first steps, so they count against the
+    // same step budget and reach the episode log like any other step.
+    let mut replay = replay_for(cdp, a, &url_before, &mut loaded);
+    let replayed = replay.steps.len();
+    steps.append(&mut replay.steps);
 
     let mut stop = loop {
         if steps.len() >= a.steps {
@@ -710,21 +907,10 @@ fn run_loop(cdp: &mut Cdp, judge: &dyn Judge, helper: Option<&TextHelper>, a: &M
         if started.elapsed() > WALL_CLOCK {
             break format!("wall clock of {}s reached", WALL_CLOCK.as_secs());
         }
-        let mut before = match snapshot(cdp) {
+        let before = match loaded_snapshot(cdp, &mut loaded) {
             Ok(o) => o,
             Err(e) => break format!("snapshot failed: {e}"),
         };
-        // Reliability over speed: the first time the run reaches a URL, scroll
-        // through it once so lazy sections (results, showtimes) are loaded
-        // before Jev judges the page. Only on a new URL — scrolling would close
-        // an open drop-down on the current one.
-        if loaded.insert(before.url.clone()) {
-            load_whole_page(cdp);
-            match snapshot(cdp) {
-                Ok(o) => before = o,
-                Err(e) => break format!("snapshot failed: {e}"),
-            }
-        }
         if !a.allow_remote && !is_loopback_host(&before.url) {
             break format!("navigated off loopback to {}; rerun with --allow-remote", firewall::host_only(&before.url));
         }
@@ -911,6 +1097,11 @@ fn run_loop(cdp: &mut Cdp, judge: &dyn Judge, helper: Option<&TextHelper>, a: &M
             }
         }
     }
+    // A route that broke is part of the run's story: say where replay gave up
+    // before the sentence about how the run itself ended.
+    if let Some(why) = &replay.stopped {
+        stop = format!("{why}; {stop}");
+    }
     let url_after = cdp.eval("location.href").map(|s| s.trim_matches('"').to_string()).unwrap_or_default();
     if let Ok(now) = snapshot(cdp) {
         last_page = now;
@@ -926,6 +1117,8 @@ fn run_loop(cdp: &mut Cdp, judge: &dyn Judge, helper: Option<&TextHelper>, a: &M
         ok,
         stop,
         episode_id: None,
+        replay_from: replay.from,
+        replayed,
         url_before,
         url_after,
         judge_calls: judge.calls(),
@@ -1240,6 +1433,100 @@ mod tests {
     }
 
     #[test]
+    fn no_replay_is_off_until_the_flag_asks_for_it() {
+        assert!(!parse_args(&args(&["--goal", "x"]), None).unwrap().no_replay, "a route is replayed by default");
+        let off = parse_args(&args(&["--goal", "x", "--no-replay"]), None).unwrap();
+        assert!(off.no_replay);
+        assert!(!off.no_priors, "the two opt-outs are independent flags");
+        let both = parse_args(&args(&["--goal", "x", "--no-replay", "--no-priors"]), None).unwrap();
+        assert!(both.no_replay && both.no_priors);
+    }
+
+    #[test]
+    fn replay_reads_the_log_only_when_both_flags_allow_it() {
+        let mut a = MoveArgs { goal: "x".into(), ..Default::default() };
+        assert!(replay_enabled(&a));
+        a.no_replay = true;
+        assert!(!replay_enabled(&a), "--no-replay skips replay on its own");
+        a.no_replay = false;
+        a.no_priors = true;
+        assert!(!replay_enabled(&a), "--no-priors turns off every read of the episode log, replay included");
+    }
+
+    fn route_step(op: &str, target: Option<&str>, page_sig: &str) -> episodes::RouteStep {
+        episodes::RouteStep {
+            operation: op.into(),
+            target: target.map(str::to_string),
+            page_sig: page_sig.into(),
+            url: format!("https://{page_sig}"),
+        }
+    }
+
+    #[test]
+    fn a_route_step_matches_the_path_not_the_hash_and_needs_its_control() {
+        let click = route_step("CLICK", Some("Search"), "github.com/search#aaaa");
+        assert!(route_step_matches("github.com/search#bbbb", true, &click), "the hash moves when a menu opens, the path does not");
+        assert!(!route_step_matches("github.com/other#aaaa", true, &click), "another page is not the one the route acted on");
+        assert!(!route_step_matches("github.com/search#bbbb", false, &click), "the control must still be on the page");
+
+        let scroll = route_step("SCROLL_DOWN", None, "github.com/search#aaaa");
+        assert!(route_step_matches("github.com/search#cccc", false, &scroll), "a scroll names no control");
+        assert!(!route_step_matches("github.com/other#cccc", false, &scroll), "the page still has to match");
+    }
+
+    #[test]
+    fn clicked_for_step_matches_the_label_head_not_the_arrow_hint() {
+        let candidate = |kind: &str, label: &str| ObservedElement { kind: kind.into(), label: label.into(), ..Default::default() };
+        let candidates = vec![
+            candidate("click", "Cartelera \u{2192} 3 showtimes"),
+            candidate("fill", "Search"),
+            candidate("scroll", "Search"),
+        ];
+        let click = route_step("CLICK", Some("Search"), "example.com/#aaaa");
+        assert_eq!(clicked_for_step(&candidates, &click).map(|el| el.kind.as_str()), Some("fill"), "the first non-scroll match wins");
+        let hinted = route_step("CLICK", Some("Cartelera"), "example.com/#aaaa");
+        assert_eq!(clicked_for_step(&candidates, &hinted).map(|el| el.label.as_str()), Some("Cartelera \u{2192} 3 showtimes"), "the stored label is the one the loop logged");
+        let gone = route_step("CLICK", Some("Book"), "example.com/#aaaa");
+        assert!(clicked_for_step(&candidates, &gone).is_none(), "a control this page no longer offers is not clicked");
+        assert!(clicked_for_step(&candidates, &route_step("SCROLL_DOWN", None, "example.com/#aaaa")).is_none());
+    }
+
+    #[test]
+    fn a_broken_route_says_which_step_gave_up() {
+        let broke = replay_broke(3, "no control labelled \"Book\" on this page".into(), Vec::new());
+        assert_eq!(broke.stopped.as_deref(), Some("replay stopped at step 3: no control labelled \"Book\" on this page"));
+        assert!(broke.steps.is_empty());
+        assert!(Replay::default().stopped.is_none(), "no note means the route ran to the end");
+    }
+
+    #[test]
+    fn the_report_says_how_much_replay_did_and_omits_an_absent_route() {
+        let report = |replayed: usize, replay_from: Option<String>| MoveReport {
+            ok: true,
+            stop: "the goal check passed on this page (p=0.80)".into(),
+            episode_id: None,
+            replay_from,
+            replayed,
+            url_before: "https://cinema.example/".into(),
+            url_after: "https://cinema.example/booking".into(),
+            judge_calls: 1,
+            text_calls: 0,
+            text_model: None,
+            elapsed_ms: 900,
+            steps: Vec::new(),
+            title: "Cartelera".into(),
+            page_text: String::new(),
+        };
+        let with_route = serde_json::to_string(&report(2, Some("100-1".into()))).unwrap();
+        assert!(with_route.contains("\"replayed\":2"), "{with_route}");
+        assert!(with_route.contains("\"replay_from\":\"100-1\""), "the route's episode id is on the report: {with_route}");
+        assert!(with_route.contains("\"judge_calls\":1"), "a full replay still costs the one goal check: {with_route}");
+        let without = serde_json::to_string(&report(0, None)).unwrap();
+        assert!(!without.contains("replay_from"), "no route was replayed: the field is absent, not null: {without}");
+        assert!(without.contains("\"replayed\":0"), "{without}");
+    }
+
+    #[test]
     fn past_runs_state_is_absent_without_rows_and_serializes_the_priors() {
         assert!(past_runs_json(&[]).is_none(), "no rows: no key, not an empty array");
         let rows = vec![prior("CLICK", Some("Search"), 3, 0.72), prior("CLICK", Some("Close"), 2, -1.4)];
@@ -1519,6 +1806,7 @@ mod tests {
             hints_dir: None,
             // Never read the operator's real episode log from a test.
             no_priors: true,
+            no_replay: false,
         };
         let report = run_loop(&mut cdp, &judge, None, &a);
         let text = serde_json::to_string(&report).unwrap();
