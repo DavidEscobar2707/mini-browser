@@ -238,14 +238,28 @@ fn merge_rows(rows: Vec<(String, Prior)>) -> Vec<Merged> {
     out
 }
 
+/// Ops that never count as "helps": WAIT and the manual scrolls carry the
+/// goal progress of the step that follows them, so a win on one of them is a
+/// return leaking backward, not a lesson (plans/007, the 006 cinemark
+/// episodes). They can still be an "avoid": a scroll that wasted a step cost
+/// one.
+const NO_HELP_OPS: [&str; 3] = ["WAIT", "SCROLL_DOWN", "SCROLL_UP"];
+
 /// Wins first (best return first), then losses (worst first) — a line that
 /// stops a wasted click is worth keeping even when there are many wins.
 fn action_bullets(rows: &[Merged]) -> Vec<String> {
-    let mut helps: Vec<&Merged> = rows.iter().filter(|r| r.n >= MIN_TRIES && r.mean >= HELPS_AT).collect();
+    let mut helps: Vec<&Merged> = rows
+        .iter()
+        .filter(|r| r.n >= MIN_TRIES && r.mean >= HELPS_AT && !never_helps(&r.operation))
+        .collect();
     let mut avoids: Vec<&Merged> = rows.iter().filter(|r| r.n >= MIN_TRIES && r.mean <= AVOID_AT).collect();
     helps.sort_by(|a, b| b.mean.total_cmp(&a.mean).then(tie(a, b)));
     avoids.sort_by(|a, b| a.mean.total_cmp(&b.mean).then(tie(a, b)));
     helps.iter().chain(avoids.iter()).map(|r| bullet(r, r.mean >= HELPS_AT)).collect()
+}
+
+fn never_helps(operation: &str) -> bool {
+    NO_HELP_OPS.iter().any(|op| operation.eq_ignore_ascii_case(op))
 }
 
 /// Deterministic order behind equal means: more tries first, then the names.
@@ -484,6 +498,25 @@ mod tests {
                 "- On example.com/a: CLICK \"Book\" helps (return +0.50, n=2).",
                 "- On example.com/a: avoid CLICK \"Trap\" (return -0.21, n=2).",
             ]
+        );
+    }
+
+    #[test]
+    fn wait_and_the_manual_scrolls_never_help() {
+        let rows = vec![
+            merged("example.com/a", "WAIT", None, 4, 0.80),
+            merged("example.com/a", "SCROLL_DOWN", None, 3, 0.60),
+            merged("example.com/a", "SCROLL_UP", None, 5, 0.55),
+            merged("example.com/a", "CLICK", Some("Book"), 2, 0.50),
+            merged("example.com/a", "SCROLL_DOWN", None, 2, -0.90),
+        ];
+        assert_eq!(
+            action_bullets(&rows),
+            vec![
+                "- On example.com/a: CLICK \"Book\" helps (return +0.50, n=2).",
+                "- On example.com/a: avoid SCROLL_DOWN (return -0.90, n=2).",
+            ],
+            "the return of a wait or a scroll is the next step's, so only the loss is real"
         );
     }
 
