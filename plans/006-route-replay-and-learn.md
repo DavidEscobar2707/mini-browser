@@ -1,6 +1,6 @@
 # 006 - Route replay + learned site notes (RL phases 3 and 4)
 
-Status: IN PROGRESS. Workers: `p3-replay`, `p4-learn` (herdr, OMP, deepseek-v4.1-flash). Depends on 005.
+Status: DONE (226 tests; live on Cinemark). Workers: `p3-replay`, `p4-learn` (herdr, OMP, deepseek-v4.1-flash). Depends on 005.
 
 ## Why
 Phase 2 showed that priors alone do not cut Jev calls on an easy task (5 vs 5). The cost is one
@@ -74,3 +74,19 @@ Docs (AGENTS.md/README.md) are done by the orchestrator after merge.
 ## Done / STOP
 Same as plans 004/005: tests green, commit on own branch, no merge/push/secrets/network/mini.exe,
 final line `DONE <branch> <sha> <N tests passed>` or `BLOCKED <reason>`.
+
+## Live results (Cinemark Arkadia, alternated)
+
+| mode | Jev calls | ms | replayed |
+|---|---|---|---|
+| replay (full route) | 1 | 8,067 | 4 |
+| replay (broke at step 3) | 4 | 11,646 | 2 |
+| replay (broke at step 1) | 7 | 12,350 | 0 |
+| no replay | 6 / 9 | 11,678 / 13,556 | 0 |
+
+A full replay cuts Jev calls by 85% and time by 35%. The problem: 2 of 3 replays broke on an EXACT
+label match. Drop-down labels contain the current selection ("Seleccionar Teatro Todos los teatros
+icon: down"), and the page starts in a different state (cookie, pop-up). Next: fuzzy match the
+target (token overlap, same role), and on a mismatch ask Jev for ONE step with the route step as a
+hint, then resume the replay. Also: `--learn` lists WAIT as "helps" (the return leaks backward).
+Exclude WAIT/SCROLL from the "helps" bullets.

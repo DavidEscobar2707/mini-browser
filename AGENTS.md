@@ -130,3 +130,13 @@ Rebuild before relaunching — a running `mini.exe` holds the target file lock a
 `cargo build` fails with os error 5 (kill stale `mini.exe` first). `cargo test`
 must pass after any change to `src/debug.rs`, `src/analyze.rs`, `src/qa/**`, or
 any of the injected JS (`DEBUG_RECORDER_SCRIPT`, `tools/qa-*.js`).
+
+## Learning loop (plans 004-006)
+
+- Every `--move` run is an episode in `%LOCALAPPDATA%\Mini\episodes\<host>.jsonl` (`episode_id` in move.json).
+- `--move` sends `past_runs` (discounted action values for this page) to Jev, and first replays the best
+  known route for the same goal with no Jev calls (`replayed`, `replay_from` in move.json).
+  `--no-replay` turns off replay; `--no-priors` turns off both.
+- `mini --feedback good|bad "reason" [--id ID]` labels an episode. A bad label removes its route from replay.
+- `mini --episodes [host]` shows stats; `mini --learn [host] [--write]` writes the learned block into
+  `%LOCALAPPDATA%\Mini\hints\<host>.md` (between `<!-- mini:learned -->` markers; other lines untouched).

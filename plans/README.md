@@ -13,7 +13,7 @@ Product intent these plans serve: a coding agent working on a local app keeps on
 | 003 | Let Jev take goal steps in the live loopback debug window | P1 | L | 001, 002 | DONE (plus `--observe`, `--url`, `--allow-remote`, password fields in `--move` only) |
 | 004 | Episode log, reward, human feedback (RL phase 1) | P1 | M | 003 | DONE (live-verified on Cinemark Arkadia) |
 | 005 | Action-value priors from past episodes (RL phase 2) | P1 | M | 004 | DONE (A/B confounded by site cookie; see plan) |
-| 006 | Route replay + learned site notes (RL phases 3-4) | P1 | M | 005 | IN PROGRESS |
+| 006 | Route replay + learned site notes (RL phases 3-4) | P1 | M | 005 | DONE (full replay: 1 Jev call vs 6-9) |
 
 Status values: TODO | IN PROGRESS | DONE | BLOCKED (with one-line reason) | REJECTED (with one-line rationale — finding fixed independently or approach abandoned)
 
