@@ -11,6 +11,7 @@ mod episodes;
 mod affordance;
 mod learn;
 mod text_helper;
+mod desk;
 
 use crate::qa::Browser;
 
