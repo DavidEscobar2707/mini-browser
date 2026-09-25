@@ -648,10 +648,65 @@ pub fn load_episodes(dir: Option<&Path>, host: &str) -> Vec<Episode> {
         .unwrap_or_default()
 }
 
-/// STUB: worker p3-replay implements (rules in plan 006).
+/// The best route earlier runs found for one goal, or `None` when the log has
+/// nothing replayable.
+///
+/// A candidate is an episode for this goal that the run's own verdict called
+/// ok, that no human labelled `bad`, and that earned at least 0.5. An episode
+/// with any TYPE_TEXT step is out: the value typed is not stored, so the step
+/// cannot be repeated. The route is the episode's steps that moved the page
+/// (CLICK, SCROLL_DOWN, PRESS_ENTER) — WAIT, DONE and no-effect steps drop.
+///
+/// Fewest steps wins; a tie goes to the higher final reward, then the newest
+/// run. An empty route is no route.
 pub fn best_route(eps: &[Episode], goal_key: &str) -> Option<Route> {
-    let _ = (eps, goal_key);
-    None
+    let mut best: Option<(u64, Route)> = None;
+    for ep in eps {
+        if ep.goal_key != goal_key || !ep.ok {
+            continue;
+        }
+        if ep.feedback.as_ref().is_some_and(|f| f.label.eq_ignore_ascii_case("bad")) {
+            continue;
+        }
+        let final_reward = ep.final_reward();
+        if final_reward < 0.5 {
+            continue;
+        }
+        if ep.steps.iter().any(|s| s.operation == "TYPE_TEXT") {
+            continue;
+        }
+        let steps: Vec<RouteStep> = ep
+            .steps
+            .iter()
+            .filter(|s| s.page_changed && matches!(s.operation.as_str(), "CLICK" | "SCROLL_DOWN" | "PRESS_ENTER"))
+            .map(|s| RouteStep {
+                operation: s.operation.clone(),
+                target: s.target.clone(),
+                page_sig: s.page_sig.clone(),
+                url: s.url.clone(),
+            })
+            .collect();
+        if steps.is_empty() {
+            continue;
+        }
+        let route = Route { episode_id: ep.id.clone(), goal_key: goal_key.to_string(), final_reward, steps };
+        let wins = match &best {
+            None => true,
+            Some((best_ts, better)) => match route.steps.len().cmp(&better.steps.len()) {
+                std::cmp::Ordering::Less => true,
+                std::cmp::Ordering::Greater => false,
+                std::cmp::Ordering::Equal => match route.final_reward.total_cmp(&better.final_reward) {
+                    std::cmp::Ordering::Greater => true,
+                    std::cmp::Ordering::Less => false,
+                    std::cmp::Ordering::Equal => ep.ts_ms > *best_ts,
+                },
+            },
+        };
+        if wins {
+            best = Some((ep.ts_ms, route));
+        }
+    }
+    best.map(|(_, route)| route)
 }
 
 impl PriorTable {
@@ -1126,6 +1181,125 @@ mod tests {
         assert_eq!(rows[0].n, 1);
         assert!(rows[0].exact);
         assert!((rows[0].mean_return - 1.45).abs() < 1e-9, "{rows:?}");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// One step of a logged run, as `best_route` reads it.
+    fn at(op: &str, target: Option<&str>, page_sig: &str, url: &str, page_changed: bool) -> StepSample {
+        StepSample {
+            operation: op.into(),
+            target: target.map(str::to_string),
+            page_sig: page_sig.into(),
+            url: url.into(),
+            page_changed,
+            ..Default::default()
+        }
+    }
+
+    fn route_episode(id: &str, ts_ms: u64, goal_key: &str, episode_reward: f64, steps: Vec<StepSample>) -> Episode {
+        Episode { id: id.into(), ts_ms, goal_key: goal_key.into(), ok: true, episode_reward, steps, ..Default::default() }
+    }
+
+    /// One click that moved the page: the shortest possible route.
+    fn search_click() -> StepSample {
+        at("CLICK", Some("Search"), "example.com/#aaaa", "https://example.com/", true)
+    }
+
+    #[test]
+    fn best_route_skips_bad_labels_failed_runs_other_goals_and_low_scores() {
+        let good = route_episode("1-1", 10, "book dune", 1.4, vec![search_click()]);
+        let cases = vec![
+            labeled(route_episode("2-1", 20, "book dune", 1.4, vec![search_click()]), "bad"),
+            Episode { ok: false, ..route_episode("3-1", 30, "book dune", 1.4, vec![search_click()]) },
+            route_episode("4-1", 40, "find coffee", 1.4, vec![search_click()]),
+            route_episode("5-1", 50, "book dune", 0.4, vec![search_click()]),
+        ];
+        for ep in cases {
+            assert!(best_route(&[ep.clone()], "book dune").is_none(), "{ep:?} is not a candidate");
+        }
+        let route = best_route(&[good], "book dune").expect("an ok, unlabelled, high-scoring episode is a route");
+        assert_eq!(route.episode_id, "1-1");
+        assert_eq!(route.goal_key, "book dune");
+        assert!((route.final_reward - 1.4).abs() < 1e-9);
+        assert_eq!(route.steps.len(), 1);
+        assert_eq!(route.steps[0].operation, "CLICK");
+        assert_eq!(route.steps[0].target.as_deref(), Some("Search"));
+        assert_eq!(route.steps[0].page_sig, "example.com/#aaaa");
+        assert_eq!(route.steps[0].url, "https://example.com/");
+
+        // A human "good" floors the reward at 1.0, so a run the code scored
+        // 0.4 is still worth replaying.
+        let floored = labeled(route_episode("6-1", 60, "book dune", 0.4, vec![search_click()]), "good");
+        assert_eq!(best_route(&[floored], "book dune").unwrap().episode_id, "6-1");
+    }
+
+    #[test]
+    fn best_route_drops_wait_done_and_no_effect_steps_and_refuses_typed_runs() {
+        let noisy = route_episode("1-1", 10, "book dune", 1.4, vec![
+            at("WAIT", None, "example.com/#aaaa", "https://example.com/", true),
+            at("DONE", None, "example.com/booking#bbbb", "https://example.com/booking", true),
+            at("SCROLL_DOWN", None, "example.com/booking#bbbb", "https://example.com/booking", false),
+            at("CLICK", Some("Search"), "example.com/#aaaa", "https://example.com/", false),
+            at("CLICK", Some("Book"), "example.com/booking#bbbb", "https://example.com/booking", true),
+        ]);
+        let route = best_route(&[noisy], "book dune").unwrap();
+        assert_eq!(route.steps.len(), 1, "WAIT, DONE and the two no-effect steps drop: {route:?}");
+        assert_eq!(route.steps[0].target.as_deref(), Some("Book"));
+        assert_eq!(route.steps[0].page_sig, "example.com/booking#bbbb");
+
+        // A typed value is not stored, so the run that typed one cannot be replayed.
+        let typed = route_episode("2-1", 20, "book dune", 1.4, vec![
+            at("TYPE_TEXT", Some("Search"), "example.com/#aaaa", "https://example.com/", true),
+            at("CLICK", Some("Search"), "example.com/#aaaa", "https://example.com/", true),
+        ]);
+        assert!(best_route(&[typed], "book dune").is_none());
+
+        // A run where nothing moved the page has no route at all.
+        let stuck = route_episode("3-1", 30, "book dune", 1.4, vec![at("CLICK", Some("Search"), "example.com/#aaaa", "https://example.com/", false)]);
+        assert!(best_route(&[stuck], "book dune").is_none());
+        assert!(best_route(&[], "book dune").is_none(), "no episodes, no route");
+    }
+
+    #[test]
+    fn best_route_takes_the_shortest_then_the_best_then_the_newest() {
+        let long = route_episode("1-1", 10, "book dune", 2.9, vec![
+            at("CLICK", Some("Search"), "example.com/#aaaa", "https://example.com/", true),
+            at("CLICK", Some("Book"), "example.com/booking#bbbb", "https://example.com/booking", true),
+        ]);
+        let short = route_episode("2-1", 20, "book dune", 1.4, vec![search_click()]);
+        assert_eq!(best_route(&[long.clone(), short.clone()], "book dune").unwrap().episode_id, "2-1", "the fewer steps win, whatever they scored");
+
+        let rich = route_episode("3-1", 30, "book dune", 2.5, vec![search_click()]);
+        assert_eq!(best_route(&[short.clone(), rich.clone()], "book dune").unwrap().episode_id, "3-1");
+        assert_eq!(best_route(&[rich.clone(), short.clone()], "book dune").unwrap().episode_id, "3-1", "the log order does not decide it");
+
+        // Same length, same reward: the newest run wins, in any order.
+        let newest = route_episode("4-1", 400, "book dune", 2.5, vec![search_click()]);
+        assert_eq!(best_route(&[rich.clone(), newest.clone()], "book dune").unwrap().episode_id, "4-1");
+        assert_eq!(best_route(&[newest, rich, short, long], "book dune").unwrap().episode_id, "4-1");
+    }
+
+    #[test]
+    fn a_route_survives_the_round_trip_through_the_log() {
+        let dir = tmp_dir("route-log");
+        let raw = [
+            RawStep { step: 1, operation: "CLICK".into(), target: Some("Search".into()), page_sig: "cinema.example/#aaaaaaaa".into(), url: "https://cinema.example/".into(), page_changed: true, goal_met: Some(0.4), ms: 50 },
+            RawStep { step: 2, operation: "CLICK".into(), target: Some("Book".into()), page_sig: "cinema.example/booking#bbbbbbbb".into(), url: "https://cinema.example/booking".into(), page_changed: true, goal_met: Some(1.0), ms: 50 },
+        ];
+        let mut ep = build_episode("Book Dune tickets", true, "DONE", 1, 900, &raw);
+        ep.id = "100-1".into();
+        ep.ts_ms = 100;
+        append(Some(&dir), &ep).unwrap();
+
+        let eps = load_episodes(Some(&dir), "www.cinema.example");
+        assert_eq!(eps.len(), 1, "a www. host argument still reaches cinema.example.jsonl");
+        let route = best_route(&eps, &normalize_goal("  Book   Dune  tickets ")).expect("a logged ok run is a route");
+        assert_eq!(route.episode_id, "100-1");
+        assert_eq!(route.goal_key, "book dune tickets");
+        assert_eq!(route.steps.len(), 2);
+        assert_eq!(route.steps[1].target.as_deref(), Some("Book"), "the stored label is what replay matches a control by");
+        assert_eq!(route.steps[1].page_sig, "cinema.example/booking#bbbbbbbb");
+        assert_eq!(route.steps[1].url, "https://cinema.example/booking");
         let _ = std::fs::remove_dir_all(&dir);
     }
 }
