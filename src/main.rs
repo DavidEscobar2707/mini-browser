@@ -12,6 +12,7 @@ mod affordance;
 mod learn;
 mod text_helper;
 mod desk;
+mod adblock;
 
 use crate::qa::Browser;
 
@@ -500,7 +501,11 @@ fn main() {
     if debug_on {
         content_builder = content_builder.with_initialization_script(DEBUG_RECORDER_SCRIPT);
     }
+    if adblock::enabled() {
+        content_builder = content_builder.with_initialization_script(adblock::YOUTUBE_AD_SKIP_SCRIPT);
+    }
     let content = die_if_webview_missing(content_builder.build_as_child(&window), "content webview");
+    adblock::install(&content); // no list file = no blocking
 
     if debug_on {
         if debug::wait_for_port(debug::port(), 15_000) {
