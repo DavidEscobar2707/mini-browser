@@ -460,6 +460,7 @@ fn main() {
         CONTENT_BROWSER_ARGS.to_string()
     };
 
+    let extensions = profile::extensions_dir();
     let mut content_builder = WebViewBuilder::new_with_web_context(&mut profile_ctx)
         .with_id("content")
         .with_html(include_str!("../ui/start.html")) // first paint
@@ -496,8 +497,11 @@ fn main() {
         .with_user_agent(edge_like_user_agent())
         .with_additional_browser_args(&content_args)
         .with_devtools(cfg!(debug_assertions) || debug_on)
-        .with_browser_extensions_enabled(false) // WebViewBuilderExtWindows
+        .with_browser_extensions_enabled(extensions.is_some()) // WebViewBuilderExtWindows
         .with_browser_accelerator_keys(false);
+    if let Some(dir) = extensions {
+        content_builder = content_builder.with_extensions_path(dir);
+    }
     if debug_on {
         content_builder = content_builder.with_initialization_script(DEBUG_RECORDER_SCRIPT);
     }

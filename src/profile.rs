@@ -19,6 +19,14 @@ pub fn shell_dir() -> PathBuf {
         .join("Shell")
 }
 
+/// Unpacked extensions for the content webview, one folder each. Opt-in:
+/// extensions stay off unless this folder exists and holds at least one.
+pub fn extensions_dir() -> Option<PathBuf> {
+    let dir = dirs::data_local_dir()?.join("Mini").join("extensions");
+    let has_any = std::fs::read_dir(&dir).ok()?.flatten().any(|e| e.path().join("manifest.json").is_file());
+    has_any.then_some(dir)
+}
+
 pub fn qa_profile_dir() -> PathBuf {
     dirs::data_local_dir()
         .expect("%LOCALAPPDATA% is unavailable")
