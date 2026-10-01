@@ -150,6 +150,11 @@ impl CuaDesk {
                    "clientInfo": {"name": "mini", "version": env!("CARGO_PKG_VERSION")}}),
         )?;
         desk.send(&request_line(None, "notifications/initialized", None))?;
+        // The agent-cursor glide costs 1.6-3 s per click (measured, cua-driver 0.28.3);
+        // with it off a UIA click returns in ~20 ms. MINI_DESK_CURSOR=1 keeps it on.
+        if std::env::var("MINI_DESK_CURSOR").ok().as_deref() != Some("1") {
+            let _ = desk.call_tool("set_agent_cursor_enabled", json!({"enabled": false}));
+        }
         Ok(desk)
     }
 
