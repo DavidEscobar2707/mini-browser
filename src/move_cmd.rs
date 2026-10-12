@@ -395,7 +395,7 @@ fn resolve<'a>(key: &str, candidates: &'a [ObservedElement]) -> Option<&'a Obser
     candidates
         .iter()
         .find(|el| questions::move_target_key(candidates, el).as_deref() == Some(key)
-            && matches!(el.kind.as_str(), "click" | "fill" | "select"))
+            && matches!(el.kind.as_str(), "click" | "fill" | "select" | "goto"))
 }
 
 /// One decision: operation + resolved target from a single Jev request.
@@ -597,6 +597,20 @@ fn perform(cdp: &mut dyn Page, d: &Decision, typed: Option<&str>, typing: &mut T
             cdp.eval(&format!("window.__miniQA.act('select', {})", id.ok_or("SELECT without a target")?))?;
             Ok(None)
         }
+        "GO_TO" => {
+            let id = id.ok_or("GO_TO without a target")?;
+            // Center the heading so the block's controls below it are on screen next step.
+            let out = cdp.eval(&format!(
+                "(() => {{ const q = window.__miniQA; const a = q.__lastActions && q.__lastActions[{id}]; \
+                 const e = a && q.__dom.nodeFor(a.node); if (!e || !e.isConnected) return false; \
+                 e.scrollIntoView({{ block: 'start', behavior: 'instant' }}); \
+                 window.scrollBy(0, -Math.round(innerHeight * 0.25)); return true; }})()"
+            ))?;
+            if out != "true" {
+                return Ok(Some("not moved: the heading is gone".into()));
+            }
+            Ok(None)
+        }
         "SCROLL_DOWN" | "SCROLL_UP" => {
             let delta = if d.operation == "SCROLL_DOWN" { 560.0 } else { -560.0 };
             let size = cdp.eval("[innerWidth, innerHeight]")?;
@@ -743,7 +757,7 @@ const REPEAT_LIMIT: u32 = 3;
 
 impl LoopGuard {
     fn key(url: &str, el: &ObservedElement) -> (String, String, String) {
-        let label = if matches!(el.kind.as_str(), "click" | "fill" | "select") {
+        let label = if matches!(el.kind.as_str(), "click" | "fill" | "select" | "goto") {
             el.label.split(" \u{2192} ").next().unwrap_or(&el.label).trim().to_string()
         } else {
             el.id.to_uppercase()

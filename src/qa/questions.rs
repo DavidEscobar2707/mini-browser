@@ -61,6 +61,9 @@ const CLICK_LABEL: &str =
     "Click a button, link, menu, tab, accordion header, modal trigger, filter chip, or similar control.";
 const TYPE_TEXT_LABEL: &str = "Enter or replace text in an editable field.";
 const SELECT_LABEL: &str = "Choose an observed dropdown value.";
+/// `mini --move`: jump to an off-screen section heading (the agent's Ctrl+F).
+const GO_TO_LABEL: &str = "Jump straight to an off-screen section heading named in the goal (like Ctrl+F); \
+its controls become visible on the next step. Prefer this over repeated SCROLL_DOWN.";
 const DONE_LABEL: &str = "Every visible control in the section has been exercised at least once.";
 const BLOCKED_LABEL: &str = "No supported operation can make progress.";
 
@@ -508,6 +511,9 @@ no supported operation can make progress. page.rest_of_page is page text outside
 counts as visible evidence for DONE (the operator can scroll to it). tried_without_effect lists controls \
 already tried on this page that changed nothing: they are not offered again; choose a different way \
 forward, such as another control, SCROLL_DOWN, or DONE when the evidence is already on the page. \
+When the goal names an item (a movie, product, section) whose heading is offered under GO_TO, GO_TO it \
+first instead of clicking a similar control elsewhere; a short label like a time carries its section \
+after a dash (\"18:00 \u{2014} TITLE\"): pick the one whose section matches the goal. \
 After typing a search, submit it: PRESS_ENTER when offered, or CLICK the matching search button; do \
 not open help or documentation links. A control with search_like true that is a textbox you cannot \
 type into opens the real search field: CLICK it first, then TYPE_TEXT into the field that appears. \
@@ -537,7 +543,7 @@ supplied_fields.";
 pub fn move_target_key(candidates: &[ObservedElement], target: &ObservedElement) -> Option<String> {
     let mut order: Vec<u64> = Vec::new();
     for el in candidates {
-        if matches!(el.kind.as_str(), "click" | "fill" | "select") && !order.contains(&el.node) {
+        if matches!(el.kind.as_str(), "click" | "fill" | "select" | "goto") && !order.contains(&el.node) {
             order.push(el.node);
         }
     }
@@ -578,6 +584,7 @@ pub fn move_question(
             "click" => "CLICK",
             "fill" => "TYPE_TEXT",
             "select" => "SELECT",
+            "goto" => "GO_TO",
             _ => {
                 controls.insert(el.id.to_uppercase(), el.label.clone());
                 continue;
@@ -641,6 +648,9 @@ pub fn move_question(
     }
     if targets.contains_key("SELECT") {
         operation_criteria.insert("SELECT".into(), json!(SELECT_LABEL));
+    }
+    if targets.contains_key("GO_TO") {
+        operation_criteria.insert("GO_TO".into(), json!(GO_TO_LABEL));
     }
     for (id, label) in &controls {
         operation_criteria.insert(id.clone(), json!(label));
@@ -932,6 +942,21 @@ mod tests {
         assert_eq!(q["claim_1"]["instructions"]["claim"], "24/7 support");
         assert!(q.get("claim_2").is_none());
     }
+    #[test]
+    fn move_question_offers_go_to_for_offscreen_headings() {
+        let observation = Observation::default();
+        let candidates = vec![
+            element("click", 1, "e1", "18:40 \u{2014} EL CORAZON DE LA BESTIA"),
+            element("goto", 2, "e2", "COYOTE VS ACME (below)"),
+        ];
+        let q = move_question("book COYOTE VS ACME at 18:00", &observation, &candidates, &[], &[], false);
+        let ops = q["questions"]["operation"]["criteria"].as_object().unwrap();
+        assert!(ops.contains_key("GO_TO"));
+        let goto = q["questions"]["go_to_target"]["criteria"].as_object().unwrap();
+        assert!(goto.contains_key("2"), "heading keyed by its node order: {goto:?}");
+        assert!(goto["2"]["element"].as_str().unwrap().contains("COYOTE VS ACME"));
+    }
+
     #[test]
     fn move_question_carries_form_ids_and_names_but_never_values() {
         use crate::qa::{firewall, Rect};

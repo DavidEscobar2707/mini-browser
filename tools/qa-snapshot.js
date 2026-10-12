@@ -229,7 +229,66 @@
         if (editable) actions.push({ ...base, kind: 'click', value, label: 'Open ' + base.label });
       }
     }
+    // `mini --move` only: div/span controls with a JS click handler and no role (Cinemark's showtime
+    // buttons are `<div onclick>`). Without them Jev never sees "18:00" and clicks a nearby link instead.
+    if (QA.__onlyReachable === true) {
+      for (const e of root.querySelectorAll('div,span,li,td,img')) {
+        if (typeof e.onclick !== 'function' && getComputedStyle(e).cursor !== 'pointer') continue;
+        if (e.closest(dom.selector) || e.querySelector(dom.selector)) continue;
+        const parent = e.parentElement;
+        if (parent && (typeof parent.onclick === 'function') && !e.querySelector('*')) continue; // keep the outer handler
+        const text = (e.getAttribute('aria-label') || e.innerText || e.getAttribute('alt') || '').trim().replace(/\s+/g, ' ');
+        if (!text || text.length > 60 || !dom.visible(e)) continue;
+        const r = e.getBoundingClientRect();
+        const x = r.x + r.width / 2;
+        const y = r.y + r.height / 2;
+        if (r.width <= 0 || r.height <= 0 || x < 0 || y < 0 || x >= innerWidth || y >= innerHeight) continue;
+        if (!reachable(e, r)) continue;
+        // Short labels like "18:00" are ambiguous across repeated blocks: suffix the nearest
+        // ancestor heading (the movie title on Cinemark) so the judge can pick the right one.
+        let ctx = '';
+        if (text.length <= 12) {
+          // Prefer the nearest h1-h3 (a sub-heading like "HORARIOS DISPONIBLES" is an h4 and says nothing).
+          let weak = '';
+          for (let a = e.parentElement, depth = 0; a && a !== document.body && !ctx && depth < 8; a = a.parentElement, depth++) {
+            const h = a.querySelector('h1,h2,h3');
+            if (h && !h.contains(e)) ctx = (h.innerText || '').trim().replace(/\s+/g, ' ').slice(0, 50);
+            else if (!weak) {
+              const w = a.querySelector('h4,h5,h6,[class*="title" i]');
+              if (w && !w.contains(e)) weak = (w.innerText || '').trim().replace(/\s+/g, ' ').slice(0, 50);
+            }
+          }
+          if (!ctx) ctx = weak;
+        }
+        actions.push({
+          node: dom.identity(e), role: 'button', label: ctx ? text + ' \u2014 ' + ctx : text, rect: { x: r.x, y: r.y, w: r.width, h: r.height },
+          path: dom.cssPath(e), input_type: null, name: null, form_method: null, form_action: null,
+          form_id: null, href_host: null, href: null, disabled: false, kind: 'click', value: '',
+        });
+      }
+    }
     return actions;
+  }
+
+  function gotoTargets(root) {
+    const out = [];
+    const seen = new Set();
+    for (const h of root.querySelectorAll('h1,h2,h3,[role="heading"]')) {
+      if (out.length >= 60) break;
+      const text = (h.innerText || '').trim().replace(/\s+/g, ' ');
+      if (!text || text.length > 80 || seen.has(text.toLowerCase()) || !dom.visible(h)) continue;
+      const r = h.getBoundingClientRect();
+      if (r.width <= 0 || r.height <= 0) continue;
+      const where = r.bottom <= 0 ? 'above' : r.top >= innerHeight ? 'below' : null;
+      if (!where) continue; // on screen already: nothing to jump to
+      seen.add(text.toLowerCase());
+      out.push({
+        node: dom.identity(h), role: 'heading', label: text + ' (' + where + ')', rect: { x: r.x, y: r.y, w: r.width, h: r.height },
+        path: dom.cssPath(h), input_type: null, name: null, form_method: null, form_action: null,
+        form_id: null, href_host: null, href: null, disabled: false, kind: 'goto', value: '',
+      });
+    }
+    return out;
   }
 
   // Same fingerprint idea as the reference's cache.pageKey(): current values
@@ -264,6 +323,10 @@
       const height = document.documentElement.scrollHeight;
       const omitted_actions = Math.max(0, actions.length - 250);
       actions = actions.slice(0, 250);
+      // `mini --move` only: off-screen section headings as GO_TO targets (the agent's Ctrl+F).
+      // Long pages (Cinemark lists ~15 movies over ~8,600 px) were otherwise searched by blind
+      // SCROLL_DOWN, and the judge wandered off to other controls before reaching the block.
+      if (QA.__onlyReachable === true) actions.push(...gotoTargets(root));
       actions.forEach((a, i) => (a.id = 'e' + (i + 1)));
       if (scrollY + innerHeight < height - 2) actions.push({ id: 'scroll_down', kind: 'scroll', label: 'Scroll down', delta: 560 });
       if (scrollY > 0) actions.push({ id: 'scroll_up', kind: 'scroll', label: 'Scroll up', delta: -560 });

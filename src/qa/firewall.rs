@@ -171,7 +171,8 @@ pub fn candidate_elements(els: &[ObservedElement], host: &str) -> Vec<ObservedEl
 pub fn dev_candidates(els: &[ObservedElement]) -> Vec<ObservedElement> {
     let mut out: Vec<ObservedElement> = els
         .iter()
-        .filter(|el| matches!(el.kind.as_str(), "click" | "fill" | "select"))
+        // "goto" = off-screen heading jump (move mode only; the snapshot emits it only there).
+        .filter(|el| matches!(el.kind.as_str(), "click" | "fill" | "select" | "goto"))
         .filter(|el| is_visible(el))
         .filter(|el| !el.disabled)
         .cloned()
