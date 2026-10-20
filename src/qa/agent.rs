@@ -121,18 +121,22 @@ pub fn execute(cfg: &QaConfig, browser: &dyn Browser, judge: &dyn Judge) -> QaRe
         }
     }
 
-    // Prefer the runtime's own version: the page cannot be trusted for this
-    // (Mini spoofs the UA, and `userAgentData.brands` derives from that spoof).
-    let engine = match browser.browser_version() {
-        Some(version) => format!("WebView2/Chromium {}", version.split('.').next().unwrap_or(&version)),
-        None => browser
-            .eval(
-                "(navigator.userAgentData && navigator.userAgentData.brands \
-                 ? navigator.userAgentData.brands.map(b => b.brand + '/' + b.version).join(' ') \
-                 : navigator.userAgent)",
-            )
-            .map(|raw| engine_of(&raw))
-            .unwrap_or_else(|_| "WebView2/Chromium (unknown)".to_string()),
+    // The transport's own label first (a remote Chrome names its device), then the runtime's
+    // own version: the page cannot be trusted for this (Mini spoofs the UA, and
+    // `userAgentData.brands` derives from that spoof).
+    let engine = match browser.engine_label() {
+        Some(label) => label,
+        None => match browser.browser_version() {
+            Some(version) => format!("WebView2/Chromium {}", version.split('.').next().unwrap_or(&version)),
+            None => browser
+                .eval(
+                    "(navigator.userAgentData && navigator.userAgentData.brands \
+                     ? navigator.userAgentData.brands.map(b => b.brand + '/' + b.version).join(' ') \
+                     : navigator.userAgent)",
+                )
+                .map(|raw| engine_of(&raw))
+                .unwrap_or_else(|_| "WebView2/Chromium (unknown)".to_string()),
+        },
     };
 
     // A QA pass that cannot refuse writes is not a QA pass: if neither
@@ -1780,6 +1784,8 @@ mod tests {
         console_message: String,
         /// When set, `firewall_status()` reports the firewall as unarmed.
         firewall_error: Option<String>,
+        /// What `engine_label()` answers; `None` keeps the trait default.
+        engine_label: Option<String>,
         /// When set, each run dir's net.jsonl gets a WebSocket open record.
         socket: Option<String>,
         /// Return `snapshot_after` from the Nth `__miniQA.snapshot` call onward.
@@ -1818,6 +1824,7 @@ mod tests {
                 console: "error".to_string(),
                 console_message: "Uncaught TypeError: cannot read properties of undefined".to_string(),
                 firewall_error: None,
+                engine_label: None,
                 socket: None,
                 snapshot_switch_at: None,
                 snapshot_after: None,
@@ -1966,6 +1973,9 @@ mod tests {
         }
         fn browser_version(&self) -> Option<String> {
             Some("153.0.4129.101".to_string())
+        }
+        fn engine_label(&self) -> Option<String> {
+            self.engine_label.clone()
         }
     }
 
@@ -2574,6 +2584,16 @@ mod tests {
             "WebView2/Chromium 151.0.4129.101"
         );
         assert_eq!(engine_of(""), "WebView2/Chromium unknown");
+    }
+
+    #[test]
+    fn a_transports_engine_label_wins_over_the_runtime_version() {
+        let plain = FakeBrowser::new("engine-plain");
+        assert_eq!(executed(&plain, &ScriptedJudge::with(&["DONE"])).engine, "WebView2/Chromium 153");
+        let mut remote = FakeBrowser::new("engine-label");
+        remote.engine_label = Some("Chrome/141.0.0.0 on Pixel 8 (emulator-5554), Android 16".to_string());
+        let report = executed(&remote, &ScriptedJudge::with(&["DONE"]));
+        assert_eq!(report.engine, "Chrome/141.0.0.0 on Pixel 8 (emulator-5554), Android 16");
     }
 
     #[test]

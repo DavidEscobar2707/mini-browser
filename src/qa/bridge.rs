@@ -52,7 +52,7 @@ fn now_ms() -> u64 {
 }
 
 /// Minimal standard-alphabet base64 decoder (screenshot bytes only; no new dep).
-fn base64_decode(input: &str) -> Result<Vec<u8>, String> {
+pub(crate) fn base64_decode(input: &str) -> Result<Vec<u8>, String> {
     fn val(b: u8) -> Option<u8> {
         match b {
             b'A'..=b'Z' => Some(b - b'A'),

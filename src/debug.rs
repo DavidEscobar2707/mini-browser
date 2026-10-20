@@ -322,8 +322,6 @@ impl DebugRecorder {
 
     /// A recorder that writes runs under `session_dir` and never touches
     /// `current.json` (the device lane must not clobber a live debug window).
-    // `dead_code` until `qa::remote` (plan 010 B3) opens its recorder here.
-    #[allow(dead_code)]
     pub fn start_private(session_dir: PathBuf) -> Option<DebugRecorder> {
         std::fs::create_dir_all(&session_dir).ok()?;
         let run = open_run(&session_dir, 0, "device", "")?;

@@ -6,6 +6,8 @@
 //! Module map — one writer per file:
 //!   bridge.rs    UI-thread transport: Msg::Qa -> eval / CDP / screenshot / input.
 //!                In-process (`ICoreWebView2::CallDevToolsProtocolMethod`), no socket.
+//!   remote.rs    the same `Browser` over a remote Chromium (Chrome for Android via `adb forward`):
+//!                CDP on a websocket (`cdp_bus`), recorder through a CDP binding, Fetch firewall.
 //!   agent.rs     the loop: viewports -> settle -> probe -> explore -> triage -> claims -> report.
 //!   jev.rs       Jev client (api.typesafe.ai) + typed answer validation, implements [`Judge`].
 //!   mobile.rs    tap-flow rules over before/after page state (pure).
@@ -24,6 +26,7 @@ pub mod jev;
 pub mod mobile;
 pub mod probes;
 pub mod questions;
+pub mod remote;
 pub mod report;
 
 use serde::{Deserialize, Serialize};
@@ -148,6 +151,11 @@ pub trait Browser: Send + Sync {
     /// The engine's own version string, when the transport can read it (the page
     /// cannot: Mini spoofs the UA and the brand list derives from it).
     fn browser_version(&self) -> Option<String> {
+        None
+    }
+    /// The whole engine line for the report header, when the transport knows more than a
+    /// version: a remote Chrome names its device. Wins over [`Browser::browser_version`].
+    fn engine_label(&self) -> Option<String> {
         None
     }
 }

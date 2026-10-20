@@ -1,8 +1,6 @@
 //! CDP over a websocket with events: one reader thread owns the socket, `call`
 //! waits on a per-id channel, every event goes to the registered handlers.
 //! The loopback debug window keeps using the simpler `cdp.rs` client.
-// `dead_code` until `qa::remote` (plan 010 B3) builds on this.
-#![allow(dead_code)]
 
 use parking_lot::Mutex;
 use serde_json::{json, Value};
