@@ -106,6 +106,9 @@ fn render_header(r: &QaReport, out: &mut String) {
         format_epoch_ms(r.started_ms),
         r.duration_ms as f64 / 1000.0
     ));
+    if let Some(device) = &r.device {
+        out.push_str(&format!("- Device: {device}\n"));
+    }
     out.push_str(&format!("- Engine: {}\n", r.engine));
     out.push_str(&format!("- Writes: {}\n", r.writes));
     out.push_str(&format!("- Model: {}\n", r.model));
@@ -124,12 +127,20 @@ fn render_header(r: &QaReport, out: &mut String) {
     out.push_str(&format!("- Viewports: {}\n", viewports.join(", ")));
     out.push_str(&format!("- Artifacts: {}\n", r.out_dir.display()));
     out.push('\n');
-    out.push_str(
-        "> Coverage note: this report comes from a single automated pass against Mini's own \
-         WebView2 (Chromium) engine — visual, DOM, and network facts only. There is no \
-         cross-browser or non-Chromium coverage, and it is not a substitute for a human \
-         reviewing the flagged evidence.\n\n",
-    );
+    if r.device.is_some() {
+        out.push_str(
+            "> Coverage note: this report comes from a single automated pass in Chrome for Android \
+             on the device above: visual, DOM and network facts only. Service-worker requests are \
+             not intercepted by the write firewall.\n\n",
+        );
+    } else {
+        out.push_str(
+            "> Coverage note: this report comes from a single automated pass against Mini's own \
+             WebView2 (Chromium) engine — visual, DOM, and network facts only. There is no \
+             cross-browser or non-Chromium coverage, and it is not a substitute for a human \
+             reviewing the flagged evidence.\n\n",
+        );
+    }
     out.push_str(
         "> Write boundary: every non-GET/HEAD/OPTIONS request was refused at the network layer. \
          GET is allowed (search, filters, pagination), so a page that mutates on GET is not \
@@ -440,6 +451,7 @@ mod tests {
             section: None,
             claims: Vec::new(),
             engine: "WebView2/Chromium 119.0.6045.199".into(),
+            device: None,
             model: "jev-latest".into(),
             writes: "BLOCKED",
             steps_budget: 25,
@@ -591,6 +603,27 @@ mod tests {
         let r = base_report(vec![phone, ok_viewport("tablet")]);
         let md = render_md(&r);
         assert!(md.contains("- Viewports: phone (explored), tablet"), "{md}");
+    }
+
+    #[test]
+    fn header_names_the_device_lane() {
+        let mut device = ok_viewport("device");
+        device.explored = true;
+        let mut r = base_report(vec![device]);
+        r.device = Some("AVD mini-qa (emulator-5554), Android 16".into());
+        r.engine = "Chrome/133.0.6943.137 on AVD mini-qa (emulator-5554), Android 16".into();
+        let md = render_md(&r);
+        assert!(md.contains("- Device: AVD mini-qa (emulator-5554), Android 16\n"), "{md}");
+        assert!(md.contains("- Engine: Chrome/133.0.6943.137 on AVD mini-qa (emulator-5554), Android 16\n"), "{md}");
+        assert!(md.contains("- Viewports: device (explored)\n"), "{md}");
+        // The coverage note describes the device pass, not Mini's WebView2.
+        assert!(md.contains("> Coverage note: this report comes from a single automated pass in Chrome for Android on the device above"), "{md}");
+        assert!(md.contains("Service-worker requests are not intercepted by the write firewall."), "{md}");
+        assert!(!md.contains("WebView2 (Chromium) engine"), "{md}");
+        // A WebView2 run has no Device line and keeps its own coverage note.
+        let plain = render_md(&base_report(vec![ok_viewport("desktop")]));
+        assert!(!plain.contains("- Device:"), "{plain}");
+        assert!(plain.contains("Mini's own WebView2 (Chromium) engine"), "{plain}");
     }
 
     #[test]
@@ -904,6 +937,7 @@ mod tests {
                 "Search returns relevant results".into(),
             ],
             engine: "WebView2/Chromium 119.0.6045.199".into(),
+            device: None,
             model: "jev-latest".into(),
             writes: "BLOCKED",
             steps_budget: 25,

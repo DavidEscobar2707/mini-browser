@@ -1,9 +1,10 @@
 //! The QA loop: per viewport settle -> probe -> explore (cfg.explore only) -> triage ->
 //! claims -> report. Ports `jev_ultrafast/agent.py`'s tick/predict/act shape.
 //!
-//! One clock basis throughout: epoch milliseconds. The recorder's `t` is
-//! `performance.timeOrigin + performance.now()`, `firewall::Blocked::ts_ms` is
-//! `SystemTime` since the epoch, and analyze.rs reads the same stream — so
+//! One clock basis throughout: epoch milliseconds on the browser's own clock
+//! (`Browser::clock_ms`: this machine's for WebView2, the device's for a remote Chrome). The
+//! recorder's `t` is `performance.timeOrigin + performance.now()`, `firewall::Blocked::ts_ms`
+//! and the step marks are stamped on that clock, and analyze.rs reads the same stream — so
 //! "this fact landed right after that step" is a subtraction, never a guess.
 //!
 //! Everything a run learns lands in `out_dir`: `report.md`, `report.json`,
@@ -15,7 +16,7 @@ use crate::qa::probes::{self, ErrFact, NetFact, SettleState};
 use crate::qa::{firewall, jev, questions, report};
 use crate::qa::{
     Browser, ClaimResult, Finding, FindingKind, Judge, Observation, ObservedElement, ProbeReport, QaConfig, QaReport, SectionCandidate, SeveritySource, StepRecord, Viewport,
-    ViewportFacts, VIEWPORTS,
+    ViewportFacts,
 };
 use serde_json::{json, Value};
 use std::collections::{BTreeMap, HashSet};
@@ -62,7 +63,8 @@ pub fn run(cfg: &QaConfig, browser: &dyn Browser, judge: &dyn Judge) -> i32 {
 /// mid-pass — still leaves an artefact: a crashed QA pass must never look like
 /// a clean one to whoever reads the out dir next.
 pub fn write_aborted_report(cfg: &QaConfig, reason: &str) -> i32 {
-    let viewports: Vec<ViewportFacts> = VIEWPORTS
+    let viewports: Vec<ViewportFacts> = cfg
+        .viewports()
         .iter()
         .map(|vp| ViewportFacts {
             viewport: vp.name.to_string(),
@@ -75,7 +77,8 @@ pub fn write_aborted_report(cfg: &QaConfig, reason: &str) -> i32 {
         host: cfg.host.clone(),
         section: cfg.section.clone(),
         claims: cfg.claims.clone(),
-        engine: "WebView2/Chromium (unknown)".to_string(),
+        engine: if cfg.device.is_some() { "Chrome for Android (unknown)" } else { "WebView2/Chromium (unknown)" }.to_string(),
+        device: cfg.device.clone(),
         model: cfg.model.clone(),
         writes: if cfg.allow_writes { "ALLOWED" } else { "BLOCKED" },
         steps_budget: cfg.steps(),
@@ -152,7 +155,8 @@ pub fn execute(cfg: &QaConfig, browser: &dyn Browser, judge: &dyn Judge) -> QaRe
     let mut section_resolved = false;
     let mut goal_label = cfg.section.clone().unwrap_or_else(|| "the page".to_string());
 
-    for (i, vp) in VIEWPORTS.iter().enumerate() {
+    let viewport_list = cfg.viewports();
+    for (i, vp) in viewport_list.iter().enumerate() {
         let mut facts = ViewportFacts { viewport: vp.name.to_string(), ..Default::default() };
         pass.vp_name = vp.name.to_string();
         pass.vp_mobile = vp.mobile;
@@ -194,7 +198,7 @@ pub fn execute(cfg: &QaConfig, browser: &dyn Browser, judge: &dyn Judge) -> QaRe
             if i == 0 {
                 // Nothing loaded: every viewport is inconclusive, and probing
                 // Chromium's error page would only invent findings.
-                for rest in VIEWPORTS.iter().skip(1) {
+                for rest in viewport_list.iter().skip(1) {
                     viewports.push(ViewportFacts {
                         viewport: rest.name.to_string(),
                         nav_failed: Some(e.clone()),
@@ -369,6 +373,7 @@ pub fn execute(cfg: &QaConfig, browser: &dyn Browser, judge: &dyn Judge) -> QaRe
         section: cfg.section.clone(),
         claims: cfg.claims.clone(),
         engine,
+        device: cfg.device.clone(),
         model: cfg.model.clone(),
         writes: if cfg.allow_writes { "ALLOWED" } else { "BLOCKED" },
         steps_budget: cfg.steps(),
@@ -642,7 +647,7 @@ impl<'a> Pass<'a> {
                     break;
                 }
             };
-            let step_started = now_ms();
+            let step_started = self.browser.clock_ms();
             let step = history.len() + 1;
             let margin = choice_margin(&operation.probabilities);
             let mut refused_here = false;
@@ -806,7 +811,7 @@ impl<'a> Pass<'a> {
             }
 
             let _ = self.shot(&format!("{}-step-{step:02}.jpg", self.vp_name));
-            record.ms = now_ms().saturating_sub(step_started);
+            record.ms = self.browser.clock_ms().saturating_sub(step_started);
             self.step_marks.push((step_started, step));
             history.push(record);
 
@@ -1068,14 +1073,14 @@ impl<'a> Pass<'a> {
         }
 
         // Geometry and text: arithmetic, never the model.
-        let now = now_ms();
+        let now = self.browser.clock_ms();
         for (k, item) in probe.overflow.iter().enumerate() {
             staged.push(Staged {
                 ts: now,
                 finding: geometry(
                     vp,
                     format!("{}-overflow-{k}", vp.name),
-                    format!("Horizontal overflow {} px (device {} px wide)", item.over_by, vp.width),
+                    format!("Horizontal overflow {} px (device {} px wide)", item.over_by, viewport_width(vp, probe)),
                     format!("{} extends {:.1} px past the right edge", item.path, item.over_by),
                     item.path.clone(),
                     run_rel,
@@ -1443,6 +1448,16 @@ fn choice_margin(probabilities: &BTreeMap<String, f64>) -> f64 {
     }
 }
 
+/// Width in CSS px the page was laid out at: the viewport's own, or, for the device's real
+/// screen (`DEVICE_VIEWPORT`, width 0), what the page measured.
+fn viewport_width(vp: &Viewport, probe: &ProbeReport) -> u32 {
+    if vp.width > 0 {
+        vp.width
+    } else {
+        probe.w.round() as u32
+    }
+}
+
 /// Controls the run could not click because something floats over them. This is
 /// why an exploration pass can end early, and it is a real defect: a user hits
 /// the same wall.
@@ -1797,6 +1812,11 @@ mod tests {
         /// left, and that last one repeats. Empty = the default `{"ok":true}`, so no
         /// tap-flow rule can fire.
         mobile_states: Mutex<Vec<String>>,
+        /// The device clock minus this machine's, in ms: `clock_ms()` and every line the fake
+        /// writes into a run dir use it (a remote device's recorder runs on its own clock).
+        clock_skew_ms: i64,
+        /// Every tap makes the page log a console error, stamped on the device clock.
+        error_on_tap: bool,
         /// Fail the Nth `Page.navigate` (1-based) with a connection error.
         navigate_fail_at: Option<usize>,
         navigations: std::sync::atomic::AtomicUsize,
@@ -1831,6 +1851,8 @@ mod tests {
                 snapshots: std::sync::atomic::AtomicUsize::new(0),
                 cdp_calls: Mutex::new(Vec::new()),
                 mobile_states: Mutex::new(Vec::new()),
+                clock_skew_ms: 0,
+                error_on_tap: false,
                 navigate_fail_at: None,
                 navigations: std::sync::atomic::AtomicUsize::new(0),
                 strict_roots: false,
@@ -1933,6 +1955,15 @@ mod tests {
         }
         fn tap(&self, x: f64, y: f64) -> Result<(), String> {
             self.taps.lock().push((x, y));
+            if self.error_on_tap {
+                let label = self.labels.lock().last().cloned().unwrap_or_default();
+                let line = json!({ "cmd": "debug", "kind": "console", "t": self.clock_ms(), "url": "https://example.com/promotions",
+                    "level": "error", "args": ["Uncaught RangeError: raised by the tap", "app.js:9:1"] });
+                let path = self.root.join(format!("run-{label}")).join("frontend.jsonl");
+                let mut lines = std::fs::read_to_string(&path).unwrap_or_default();
+                lines.push_str(&format!("{line}\n"));
+                std::fs::write(&path, lines).map_err(|e| e.to_string())?;
+            }
             Ok(())
         }
         fn key_text(&self, text: &str) -> Result<(), String> {
@@ -1943,7 +1974,7 @@ mod tests {
             self.labels.lock().push(label.to_string());
             let dir = self.root.join(format!("run-{label}"));
             std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
-            let t = now_ms();
+            let t = self.clock_ms();
             let console = json!({ "cmd": "debug", "kind": "console", "t": t, "url": "https://example.com/promotions",
                 "level": self.console, "args": [self.console_message.clone(), "app.js:3:1"] });
             std::fs::write(dir.join("frontend.jsonl"), format!("{console}\n")).map_err(|e| e.to_string())?;
@@ -1977,6 +2008,9 @@ mod tests {
         fn engine_label(&self) -> Option<String> {
             self.engine_label.clone()
         }
+        fn clock_ms(&self) -> u64 {
+            (now_ms() as i64 + self.clock_skew_ms) as u64
+        }
     }
 
     fn config(browser: &FakeBrowser) -> QaConfig {
@@ -1992,6 +2026,16 @@ mod tests {
             wall_clock_s: 60,
             model: crate::qa::DEFAULT_MODEL.to_string(),
             api_key: Some("test".to_string()),
+            device: None,
+        }
+    }
+
+    /// `config` for a `--device` run: one viewport, `device`, explored.
+    fn device_config(browser: &FakeBrowser) -> QaConfig {
+        QaConfig {
+            device: Some("AVD mini-qa (emulator-5554), Android 16".to_string()),
+            explore: vec!["device".to_string()],
+            ..config(browser)
         }
     }
 
@@ -2594,6 +2638,93 @@ mod tests {
         remote.engine_label = Some("Chrome/141.0.0.0 on Pixel 8 (emulator-5554), Android 16".to_string());
         let report = executed(&remote, &ScriptedJudge::with(&["DONE"]));
         assert_eq!(report.engine, "Chrome/141.0.0.0 on Pixel 8 (emulator-5554), Android 16");
+    }
+
+    #[test]
+    fn a_device_run_has_one_viewport_named_device_and_explores_it() {
+        let browser = FakeBrowser::new("device-lane");
+        let judge = ScriptedJudge::with(&["CLICK", "DONE"]);
+        let mut cfg = config(&browser);
+        cfg.device = Some("emulator-5554".into());
+        cfg.explore = vec!["device".into()];
+        let report = execute(&cfg, &browser, &judge);
+        let names: Vec<&str> = report.viewports.iter().map(|v| v.viewport.as_str()).collect();
+        assert_eq!(names, ["device"]);
+        assert!(report.viewports[0].explored);
+        assert_eq!(*browser.viewports.lock(), vec!["device"]);
+        assert_eq!(*browser.labels.lock(), vec!["device"]);
+    }
+
+    #[test]
+    fn a_device_is_a_touch_screen_and_its_shots_carry_its_name() {
+        let browser = FakeBrowser::new("device-touch");
+        let judge = ScriptedJudge::with(&["CLICK", "DONE"]);
+        let report = execute(&device_config(&browser), &browser, &judge);
+        assert_eq!(browser.taps.lock().len(), 1, "the device step is a touch tap");
+        assert_eq!(browser.clicks.lock().len(), 0, "a phone has no mouse");
+        assert!(report.out_dir.join("shots/device.jpg").exists());
+        assert!(report.out_dir.join("shots/device-step-01.jpg").exists());
+    }
+
+    #[test]
+    fn a_device_run_that_cannot_load_reports_the_device_viewport_only() {
+        let mut browser = FakeBrowser::new("device-load-fails");
+        browser.navigate_fail_at = Some(1);
+        let report = execute(&device_config(&browser), &browser, &ScriptedJudge::with(&["DONE"]));
+        let names: Vec<&str> = report.viewports.iter().map(|v| v.viewport.as_str()).collect();
+        assert_eq!(names, ["device"], "no phantom phone/tablet/desktop rows");
+        assert!(report.viewports[0].nav_failed.as_deref().unwrap_or("").contains("ERR_CONNECTION_REFUSED"));
+        assert_eq!(report::verdict(&report).exit_code, 2);
+    }
+
+    #[test]
+    fn the_report_names_the_device_only_on_a_device_run() {
+        let browser = FakeBrowser::new("device-label");
+        let report = execute(&device_config(&browser), &browser, &ScriptedJudge::with(&["DONE"]));
+        assert_eq!(report.device.as_deref(), Some("AVD mini-qa (emulator-5554), Android 16"));
+        let plain = FakeBrowser::new("no-device-label");
+        assert_eq!(executed(&plain, &ScriptedJudge::with(&["DONE"])).device, None);
+    }
+
+    #[test]
+    fn a_device_overflow_names_the_width_the_page_measured() {
+        // The device viewport has no configured size; the screen's own width is the probe's `w`.
+        let probe = PROBE_PHONE.replacen("\"w\":390,", "\"w\":412,", 1);
+        let browser = FakeBrowser::new("device-overflow").route("__miniQA.probe", &probe);
+        let report = execute(&device_config(&browser), &browser, &ScriptedJudge::with(&["DONE"]));
+        let titles: Vec<&str> = report.viewports[0].findings.iter().map(|f| f.title.as_str()).collect();
+        assert!(titles.contains(&"Horizontal overflow 12 px (device 412 px wide)"), "{titles:?}");
+        // The WebView2 lane keeps naming the configured width.
+        let phone = FakeBrowser::new("phone-overflow").route("__miniQA.probe", PROBE_PHONE);
+        let report = executed(&phone, &ScriptedJudge::with(&["DONE"]));
+        let phone = report.viewports.iter().find(|v| v.viewport == "phone").unwrap();
+        assert!(phone.findings.iter().any(|f| f.title == "Horizontal overflow 12 px (device 390 px wide)"));
+    }
+
+    #[test]
+    fn an_aborted_device_run_names_the_device_viewport_not_the_webview_ones() {
+        let browser = FakeBrowser::new("aborted-device");
+        let cfg = device_config(&browser);
+        assert_eq!(write_aborted_report(&cfg, "the QA run panicked"), 2);
+        let md = std::fs::read_to_string(cfg.out_dir.join("report.md")).expect("report.md exists");
+        assert!(md.contains("- Viewports: device\n"), "{md}");
+        assert!(md.contains("- Device: AVD mini-qa (emulator-5554), Android 16\n"), "{md}");
+        assert!(md.contains("- Engine: Chrome for Android (unknown)\n"), "{md}");
+        assert!(!md.contains("### phone"), "{md}");
+    }
+
+    #[test]
+    fn a_device_whose_clock_is_off_still_has_its_facts_attributed_to_the_step() {
+        // An emulator restored from a snapshot runs seconds behind this machine. The page's own
+        // timestamps are on that clock, so the steps must be stamped on it too.
+        let mut browser = FakeBrowser::new("clock-skew");
+        browser.clock_skew_ms = -4_000;
+        browser.error_on_tap = true;
+        let judge = ScriptedJudge::with(&["CLICK", "DONE"]);
+        let report = execute(&device_config(&browser), &browser, &judge);
+        let findings = &report.viewports[0].findings;
+        let error = findings.iter().find(|f| f.title.contains("raised by the tap")).unwrap_or_else(|| panic!("{findings:#?}"));
+        assert_eq!(error.step, Some(1), "the error followed step 1 on the device's clock: {error:?}");
     }
 
     #[test]

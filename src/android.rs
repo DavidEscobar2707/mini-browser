@@ -1,7 +1,5 @@
 //! Android devices over adb: discovery, DevTools port forward, Chrome launch,
 //! emulator boot. Parsers are pure and tested; process calls are thin.
-// `dead_code` until `--device` (plan 010 B4) calls these from `main`.
-#![allow(dead_code)]
 
 use std::path::PathBuf;
 use std::process::{Command, Stdio};
@@ -111,6 +109,29 @@ pub fn forward_devtools(serial: &str, port: u16) -> Result<(), String> {
     adb(&["-s", serial, "forward", &format!("tcp:{port}"), "localabstract:chrome_devtools_remote"]).map(|_| ())
 }
 
+/// How often `wait_for_devtools` asks, and how long one ask may take.
+const DEVTOOLS_POLL: Duration = Duration::from_millis(500);
+const DEVTOOLS_ASK: Duration = Duration::from_secs(2);
+
+/// Polls `http://127.0.0.1:<port>/json/version` until Chrome answers, or `timeout`. Chrome for
+/// Android serves `chrome_devtools_remote` only once it runs a tab: right after `launch_chrome`
+/// the `adb forward` port accepts a connection and drops it, so a failed ask is expected until
+/// then. The first answer is the proof that `/json/list` and the page socket are ready.
+pub fn wait_for_devtools(port: u16, timeout: Duration) -> Result<(), String> {
+    let url = format!("http://127.0.0.1:{port}/json/version");
+    let start = Instant::now();
+    loop {
+        let last = match ureq::get(&url).config().timeout_global(Some(DEVTOOLS_ASK)).build().call() {
+            Ok(_) => return Ok(()),
+            Err(e) => e.to_string(),
+        };
+        if start.elapsed() >= timeout {
+            return Err(format!("Chrome DevTools did not answer on 127.0.0.1:{port} within {:.1} s: {last}", timeout.as_secs_f32()));
+        }
+        std::thread::sleep(DEVTOOLS_POLL);
+    }
+}
+
 pub fn reverse_port(serial: &str, port: u16) -> Result<(), String> {
     adb(&["-s", serial, "reverse", &format!("tcp:{port}"), &format!("tcp:{port}")]).map(|_| ())
 }
@@ -192,6 +213,10 @@ pub fn boot_emulator(avd: &str, timeout: Duration) -> Result<String, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::io::{Read, Write};
+    use std::net::TcpListener;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::Arc;
 
     // Real `adb devices -l` output: an emulator reports its model as `sdk_gphone64_x86_64`.
     const LIST: &str = "List of devices attached\nemulator-5554          device product:sdk_gphone64_x86_64 model:sdk_gphone64_x86_64 device:emu64xa transport_id:3\n1A2B3C4D       unauthorized transport_id:2\n\n";
@@ -249,6 +274,59 @@ mod tests {
         // `pm list packages <filter>` matches substrings: a different package is not Chrome.
         assert!(!package_listed("package:com.android.chrome.canary\n", "com.android.chrome"));
         assert!(!package_listed("", "com.android.chrome"), "a missing package prints nothing");
+    }
+
+    /// A one-thread HTTP stub on a free loopback port. Request n (0-based) gets a 200 with
+    /// `replies[n]`; `None` closes the connection without a reply, which is what `adb forward`
+    /// does while Chrome has no DevTools socket yet. Returns the port and the request count.
+    fn http_stub(replies: Vec<Option<&'static str>>) -> (u16, Arc<AtomicUsize>) {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let served = Arc::new(AtomicUsize::new(0));
+        let count = served.clone();
+        std::thread::spawn(move || {
+            for stream in listener.incoming() {
+                let Ok(mut stream) = stream else { break };
+                let n = count.fetch_add(1, Ordering::SeqCst);
+                let mut head = [0u8; 2048];
+                let _ = stream.read(&mut head);
+                if let Some(body) = replies.get(n).copied().flatten() {
+                    let _ = write!(
+                        stream,
+                        "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                        body.len()
+                    );
+                }
+            }
+        });
+        (port, served)
+    }
+
+    #[test]
+    fn wait_for_devtools_retries_until_chrome_answers() {
+        let (port, served) = http_stub(vec![None, Some(r#"{"Browser":"Chrome/133.0.6943.137"}"#)]);
+        let started = Instant::now();
+        wait_for_devtools(port, Duration::from_secs(20)).expect("the second request is answered");
+        assert_eq!(served.load(Ordering::SeqCst), 2, "one dropped connection, then the answer");
+        assert!(started.elapsed() >= Duration::from_millis(400), "the retry waits out the poll interval");
+    }
+
+    #[test]
+    fn wait_for_devtools_returns_at_once_when_chrome_is_already_up() {
+        let (port, served) = http_stub(vec![Some("{}")]);
+        wait_for_devtools(port, Duration::from_secs(20)).expect("answered");
+        assert_eq!(served.load(Ordering::SeqCst), 1);
+    }
+
+    #[test]
+    fn wait_for_devtools_gives_up_after_the_timeout_and_names_the_port() {
+        // A port that was free a moment ago and has no listener now.
+        let port = TcpListener::bind("127.0.0.1:0").unwrap().local_addr().unwrap().port();
+        let started = Instant::now();
+        let err = wait_for_devtools(port, Duration::from_millis(700)).unwrap_err();
+        assert!(started.elapsed() >= Duration::from_millis(700), "waited the whole timeout: {:?}", started.elapsed());
+        assert!(err.contains(&format!("127.0.0.1:{port}")), "{err}");
+        assert!(err.contains("did not answer"), "{err}");
     }
 
     #[test]

@@ -2,8 +2,6 @@
 //! Same page scripts, recorder and firewall as the WebView2 bridge, carried by
 //! CDP: `Page.addScriptToEvaluateOnNewDocument`, `Runtime.addBinding`
 //! (`__miniPost`), `Fetch.enable`.
-// `dead_code` until `--device` (plan 010 B4) builds a `RemoteBrowser` from `main`.
-#![allow(dead_code)]
 
 use parking_lot::Mutex;
 use serde_json::{json, Value};
@@ -16,7 +14,50 @@ use crate::qa::firewall::{self, Blocked, FirewallPolicy};
 use crate::qa::{Browser, Viewport, PAGE_SCRIPTS};
 
 fn now_ms() -> u64 {
-    std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_millis() as u64).unwrap_or(0)
+    crate::qa::epoch_ms()
+}
+
+/// This machine's clock moved onto the device's, given `offset` = device minus this machine.
+fn on_device_clock(offset: i64) -> u64 {
+    (now_ms() as i64 + offset).max(0) as u64
+}
+
+/// Device clock minus this machine's clock, in ms. Of five readings the one with the shortest
+/// round trip wins: the device read its clock about half a round trip after the request left.
+/// The page's own timestamps (the recorder's `t`) are on the device clock; an emulator restored
+/// from a snapshot was measured 3.9 s behind this machine. 0 when the device does not answer.
+fn measure_clock_offset(bus: &CdpBus) -> i64 {
+    (0..5)
+        .filter_map(|_| {
+            let sent = now_ms();
+            let reply = bus.call("Runtime.evaluate", json!({ "expression": "Date.now()", "returnByValue": true })).ok()?;
+            let received = now_ms();
+            let device = reply.pointer("/result/value")?.as_f64()? as i64;
+            Some((received.saturating_sub(sent), device - ((sent + received) / 2) as i64))
+        })
+        .min_by_key(|(round_trip, _)| *round_trip)
+        .map(|(_, offset)| offset)
+        .unwrap_or(0)
+}
+
+/// Chrome for Android confirms a tap only after it has ruled out a double tap, so it answers
+/// `touchEnd` ~250 ms before the page sees the click (measured on Chrome 133 in a fresh tab; a
+/// tab that has been open a while answers in ~40 ms). `touch` arms this one-shot flag, then waits
+/// for it inside the page (`wait_for_click_js`): the caller reads the page after the tap, not
+/// before it.
+const ARM_CLICK_WATCH: &str = "(() => { window.__miniClick = false; window.addEventListener('click', () => { window.__miniClick = true; }, { capture: true, once: true }); })()";
+/// How long a tap waits for its click. A tap the page cancels (`preventDefault` on `touchend`)
+/// has no click and costs the whole wait.
+const CLICK_WAIT_MS: u32 = 1000;
+
+/// A promise that resolves `true` when the armed click lands, `false` after `ms` (or at once in a
+/// document that was never armed: the click navigated the page).
+fn wait_for_click_js(ms: u32) -> String {
+    format!(
+        "new Promise((done) => {{ const end = performance.now() + {ms}; const poll = () => {{ \
+         if (window.__miniClick !== false || performance.now() >= end) done(window.__miniClick === true); \
+         else setTimeout(poll, 10); }}; poll(); }})"
+    )
 }
 
 /// A Chrome (or other Chromium) page driven over one CDP websocket. Built by `connect`;
@@ -27,6 +68,7 @@ pub struct RemoteBrowser {
     blocked: Arc<Mutex<Vec<Blocked>>>,
     firewall: Result<(), String>,
     engine: String,
+    clock_offset_ms: i64,
 }
 
 impl RemoteBrowser {
@@ -35,6 +77,7 @@ impl RemoteBrowser {
     /// `session_dir` and never touches the debug window's `current.json`.
     pub fn connect(ws_url: &str, policy: FirewallPolicy, device: &str, session_dir: PathBuf) -> Result<RemoteBrowser, String> {
         let bus = CdpBus::connect(ws_url)?;
+        let clock_offset_ms = measure_clock_offset(&bus);
         let recorder = Arc::new(Mutex::new(DebugRecorder::start_private(session_dir)));
         let blocked = Arc::new(Mutex::new(Vec::new()));
 
@@ -56,7 +99,7 @@ impl RemoteBrowser {
                 let m = params.pointer("/request/method").and_then(Value::as_str).unwrap_or("GET").to_string();
                 let url = params.pointer("/request/url").and_then(Value::as_str).unwrap_or("").to_string();
                 if firewall::should_block(&policy, &m, &url) {
-                    sink.lock().push(Blocked { ts_ms: now_ms(), method: m, url, mechanism: "fetch".into() });
+                    sink.lock().push(Blocked { ts_ms: on_device_clock(clock_offset_ms), method: m, url, mechanism: "fetch".into() });
                     let _ = bus.fire("Fetch.failRequest", json!({ "requestId": id, "errorReason": "Aborted" }));
                 } else {
                     let _ = bus.fire("Fetch.continueRequest", json!({ "requestId": id }));
@@ -84,12 +127,22 @@ impl RemoteBrowser {
             .and_then(|v| v["product"].as_str().map(str::to_string))
             .unwrap_or_else(|| "Chrome/unknown".into());
         let engine = format!("{product} on {device}");
-        Ok(RemoteBrowser { bus, recorder, blocked, firewall, engine })
+        Ok(RemoteBrowser { bus, recorder, blocked, firewall, engine, clock_offset_ms })
+    }
+
+    /// Device clock minus this machine's clock, in ms (measured once by `connect`).
+    pub fn clock_offset_ms(&self) -> i64 {
+        self.clock_offset_ms
     }
 
     fn touch(&self, x: f64, y: f64) -> Result<(), String> {
+        // The watch is best effort: a page that cannot run it (mid-navigation) is no reason to
+        // refuse the tap, and a click that navigates destroys the context the wait runs in.
+        let _ = self.bus.call("Runtime.evaluate", json!({ "expression": ARM_CLICK_WATCH, "returnByValue": true }));
         self.bus.call("Input.dispatchTouchEvent", json!({ "type": "touchStart", "touchPoints": [{ "x": x, "y": y }] }))?;
         self.bus.call("Input.dispatchTouchEvent", json!({ "type": "touchEnd", "touchPoints": [] }))?;
+        let wait = json!({ "expression": wait_for_click_js(CLICK_WAIT_MS), "returnByValue": true, "awaitPromise": true });
+        let _ = self.bus.call("Runtime.evaluate", wait);
         Ok(())
     }
 }
@@ -146,16 +199,23 @@ impl Browser for RemoteBrowser {
     fn engine_label(&self) -> Option<String> {
         Some(self.engine.clone())
     }
+    fn clock_ms(&self) -> u64 {
+        on_device_clock(self.clock_offset_ms)
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use std::net::{TcpListener, TcpStream};
+    use std::sync::atomic::{AtomicBool, Ordering};
     use std::time::{Duration, Instant};
     use tungstenite::{Message, WebSocket};
 
     const DEVICE: &str = "Pixel 8 (emulator-5554), Android 16";
+    /// How far ahead of this machine the fake device's clock runs (an emulator restored from a
+    /// snapshot was measured 3.9 s behind; either sign must work).
+    const DEVICE_CLOCK_SKEW_MS: i64 = 4_000;
     /// The recorder line the fake device posts while `connect` runs.
     const FIRST_LINE: &str = r#"{"cmd":"debug","kind":"net","t":1}"#;
 
@@ -164,6 +224,9 @@ mod tests {
     struct FakeDevice {
         ws_url: String,
         frames: Arc<Mutex<Vec<Value>>>,
+        /// While set, an `awaitPromise` evaluation fails the way one does when the click it waits
+        /// for navigates the page: the execution context is destroyed.
+        context_destroyed: Arc<AtomicBool>,
     }
 
     impl FakeDevice {
@@ -200,6 +263,7 @@ mod tests {
         match expression {
             "document.readyState" => json!({ "result": { "type": "string", "value": "complete" } }),
             "1 + 1" => json!({ "result": { "type": "number", "value": 2, "description": "2" } }),
+            "Date.now()" => json!({ "result": { "type": "number", "value": now_ms() as i64 + DEVICE_CLOCK_SKEW_MS } }),
             "({ a: [1, 2] })" => json!({ "result": { "type": "object", "value": { "a": [1, 2] } } }),
             "location.href" => json!({ "result": { "type": "string", "value": "http://127.0.0.1:3000/mobile.html" } }),
             "boom()" => {
@@ -222,6 +286,8 @@ mod tests {
         let addr = listener.local_addr().unwrap();
         let frames = Arc::new(Mutex::new(Vec::<Value>::new()));
         let log = frames.clone();
+        let context_destroyed = Arc::new(AtomicBool::new(false));
+        let destroyed = context_destroyed.clone();
         std::thread::spawn(move || {
             let (stream, _) = listener.accept().unwrap();
             let mut ws = tungstenite::accept(stream).unwrap();
@@ -250,6 +316,11 @@ mod tests {
                         json!({})
                     }
                     "Browser.getVersion" => json!({ "protocolVersion": "1.3", "product": "Chrome/141.0.0.0" }),
+                    "Runtime.evaluate" if params["awaitPromise"] == true && destroyed.load(Ordering::SeqCst) => {
+                        let error = json!({ "code": -32000, "message": "Execution context was destroyed." });
+                        send(&mut ws, json!({ "id": id, "error": error }));
+                        continue;
+                    }
                     "Runtime.evaluate" => evaluate(params["expression"].as_str().unwrap_or("")),
                     "Page.captureScreenshot" => json!({ "data": "anBlZw==" }), // base64 of "jpeg"
                     _ => json!({}),
@@ -257,7 +328,7 @@ mod tests {
                 send(&mut ws, json!({ "id": id, "result": result }));
             }
         });
-        FakeDevice { ws_url: format!("ws://{addr}/devtools/page/1"), frames }
+        FakeDevice { ws_url: format!("ws://{addr}/devtools/page/1"), frames, context_destroyed }
     }
 
     /// Poll `cond` every 20 ms, up to 2 s.
@@ -298,6 +369,9 @@ mod tests {
         assert_eq!(blocked[0].method, "POST");
         assert_eq!(blocked[0].url, "https://example.com/api");
         assert_eq!(blocked[0].mechanism, "fetch");
+        // Stamped on the device's clock, the one the page's own recorder lines use.
+        let device_now = now_ms() as i64 + DEVICE_CLOCK_SKEW_MS;
+        assert!((blocked[0].ts_ms as i64 - device_now).abs() < 2_000, "{} vs the device's {device_now}", blocked[0].ts_ms);
         assert_eq!(browser.firewall_status(), Ok(()));
         let _ = std::fs::remove_dir_all(&session);
     }
@@ -378,7 +452,11 @@ mod tests {
         let err = browser.eval("boom()").unwrap_err();
         assert!(err.contains("ReferenceError: boom is not defined"), "{err}");
         assert_eq!(browser.url().unwrap(), "http://127.0.0.1:3000/mobile.html");
-        let sent = device.frames().into_iter().find(|f| f["method"] == "Runtime.evaluate").expect("an evaluate was sent");
+        let sent = device
+            .frames()
+            .into_iter()
+            .find(|f| f["method"] == "Runtime.evaluate" && f["params"]["expression"] == "document.readyState")
+            .expect("the page's readyState was asked for");
         assert_eq!(sent["params"], json!({ "expression": "document.readyState", "returnByValue": true }));
         let _ = std::fs::remove_dir_all(&session);
     }
@@ -397,18 +475,92 @@ mod tests {
         let frames = device.frames();
         let sent: Vec<(&str, &Value)> = frames[before..].iter().map(|f| (f["method"].as_str().unwrap(), &f["params"])).collect();
         let touch = |kind: &str, points: Value| json!({ "type": kind, "touchPoints": points });
+        // A tap is: arm the click watch, touchStart, touchEnd, then wait in the page for the click.
+        let arm = json!({ "expression": ARM_CLICK_WATCH, "returnByValue": true });
+        let wait = json!({ "expression": wait_for_click_js(CLICK_WAIT_MS), "returnByValue": true, "awaitPromise": true });
         assert_eq!(
             sent,
             [
+                ("Runtime.evaluate", &arm),
                 ("Input.dispatchTouchEvent", &touch("touchStart", json!([{ "x": 12.0, "y": 34.0 }]))),
                 ("Input.dispatchTouchEvent", &touch("touchEnd", json!([]))),
+                ("Runtime.evaluate", &wait),
+                ("Runtime.evaluate", &arm),
                 ("Input.dispatchTouchEvent", &touch("touchStart", json!([{ "x": 5.0, "y": 6.0 }]))),
                 ("Input.dispatchTouchEvent", &touch("touchEnd", json!([]))),
+                ("Runtime.evaluate", &wait),
                 ("Input.insertText", &json!({ "text": "hello" })),
                 ("Page.captureScreenshot", &json!({ "format": "jpeg", "quality": 80 })),
             ]
         );
         assert_eq!(std::fs::read(&shot).unwrap(), b"jpeg");
         let _ = std::fs::remove_dir_all(&session);
+    }
+
+    #[test]
+    fn the_clock_is_the_devices_not_this_machines() {
+        let device = fake_device(false);
+        let (browser, session) = open(&device, "clock");
+        // The round trip over loopback is a few ms; the estimate is the skew within that.
+        assert!((browser.clock_offset_ms() - DEVICE_CLOCK_SKEW_MS).abs() < 300, "{}", browser.clock_offset_ms());
+        let device_now = now_ms() as i64 + DEVICE_CLOCK_SKEW_MS;
+        assert!((browser.clock_ms() as i64 - device_now).abs() < 300, "{} vs the device's {device_now}", browser.clock_ms());
+        let _ = std::fs::remove_dir_all(&session);
+    }
+
+    #[test]
+    fn a_tap_whose_click_navigates_the_page_still_succeeds() {
+        let device = fake_device(false);
+        let (browser, session) = open(&device, "tap-navigates");
+        device.context_destroyed.store(true, Ordering::SeqCst);
+        assert_eq!(browser.tap(5.0, 6.0), Ok(()), "the wait failing is not the tap failing");
+        let _ = std::fs::remove_dir_all(&session);
+    }
+
+    /// The two page snippets, run for real in node (skipped without node, like the recorder's
+    /// syntax check): a click that arrives late is seen, and with no click the wait ends at its bound.
+    #[test]
+    fn the_click_watch_sees_a_late_click_and_gives_up_without_one() {
+        let script = format!(
+            r#"
+const handlers = [];
+globalThis.window = globalThis;
+globalThis.addEventListener = (type, fn) => {{ if (type === 'click') handlers.push(fn); }};
+const ARM = {arm};
+const WAIT = {wait};
+const run = async (clickAfterMs) => {{
+  handlers.length = 0;
+  eval(ARM);
+  const t0 = Date.now();
+  if (clickAfterMs !== null) setTimeout(() => handlers.forEach((h) => h()), clickAfterMs);
+  const seen = await eval(WAIT);
+  return [seen, Date.now() - t0];
+}};
+(async () => {{
+  const late = await run(150);
+  const none = await run(null); // arming must have reset the flag the late click set
+  console.log(JSON.stringify({{ late, none }}));
+}})();
+"#,
+            arm = serde_json::to_string(ARM_CLICK_WATCH).unwrap(),
+            wait = serde_json::to_string(&wait_for_click_js(400)).unwrap(),
+        );
+        let path = std::env::temp_dir().join(format!("mini-click-watch-{}.js", std::process::id()));
+        std::fs::write(&path, script).expect("write temp script");
+        let out = std::process::Command::new("node").arg(&path).output();
+        let _ = std::fs::remove_file(&path);
+        let out = match out {
+            Ok(out) => out,
+            Err(e) => {
+                eprintln!("the_click_watch_sees_a_late_click_and_gives_up_without_one: node not available ({e}); skipped");
+                return;
+            }
+        };
+        assert!(out.status.success(), "node failed:\n{}", String::from_utf8_lossy(&out.stderr));
+        let got: Value = serde_json::from_slice(&out.stdout).expect("node prints one JSON object");
+        assert_eq!(got["late"][0], json!(true), "{got}");
+        assert!(got["late"][1].as_u64().unwrap() < 380, "returns when the click lands, not at the bound: {got}");
+        assert_eq!(got["none"][0], json!(false), "{got}");
+        assert!(got["none"][1].as_u64().unwrap() >= 380, "no click: the wait runs to its bound: {got}");
     }
 }

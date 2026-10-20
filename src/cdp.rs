@@ -22,14 +22,35 @@ pub fn pick_page_target(list: &Value) -> Result<String, String> {
         .ok_or_else(|| "CDP has no page target".to_string())
 }
 
-pub fn page_ws_url(port: u16) -> Result<String, String> {
-    let body: Value = ureq::get(&format!("http://127.0.0.1:{port}/json/list"))
+/// WebSocket URL of the first `type == "page"` target whose `url` is exactly `url`. Chrome for
+/// Android lists every open tab; the one a run just opened on `about:blank` is the one to drive.
+pub fn pick_target_with_url(list: &Value, url: &str) -> Option<String> {
+    list.as_array()?
+        .iter()
+        .filter(|t| t.get("type").and_then(Value::as_str) == Some("page") && t.get("url").and_then(Value::as_str) == Some(url))
+        // Chrome leaves the socket URL out of a target another client is attached to.
+        .find_map(|t| t.get("webSocketDebuggerUrl").and_then(Value::as_str))
+        .map(str::to_string)
+}
+
+fn target_list(port: u16) -> Result<Value, String> {
+    ureq::get(&format!("http://127.0.0.1:{port}/json/list"))
         .call()
         .map_err(|e| format!("CDP /json/list failed: {e}"))?
         .body_mut()
         .read_json()
-        .map_err(|e| format!("CDP /json/list was not JSON: {e}"))?;
-    pick_page_target(&body)
+        .map_err(|e| format!("CDP /json/list was not JSON: {e}"))
+}
+
+pub fn page_ws_url(port: u16) -> Result<String, String> {
+    pick_page_target(&target_list(port)?)
+}
+
+/// The page whose URL is `url` (the tab a run just opened on `about:blank`), else the first
+/// page target.
+pub fn page_ws_url_for(port: u16, url: &str) -> Result<String, String> {
+    let list = target_list(port)?;
+    pick_target_with_url(&list, url).map(Ok).unwrap_or_else(|| pick_page_target(&list))
 }
 
 pub struct Cdp {
@@ -235,6 +256,24 @@ mod tests {
         assert_eq!(pick_page_target(&list).unwrap(), "ws://127.0.0.1:9222/devtools/page/A");
         assert!(pick_page_target(&json!([])).is_err());
         assert!(pick_page_target(&json!([{"type": "iframe"}])).is_err());
+    }
+
+    #[test]
+    fn prefers_the_page_whose_url_matches() {
+        let list = json!([
+            {"type": "page", "url": "https://example.com/", "webSocketDebuggerUrl": "ws://127.0.0.1:9333/devtools/page/A"},
+            {"type": "service_worker", "url": "about:blank", "webSocketDebuggerUrl": "ws://127.0.0.1:9333/devtools/sw"},
+            // Chrome leaves the socket URL out of a target another client is attached to.
+            {"type": "page", "url": "about:blank"},
+            {"type": "page", "url": "about:blank", "webSocketDebuggerUrl": "ws://127.0.0.1:9333/devtools/page/B"},
+            {"type": "page", "url": "about:blank", "webSocketDebuggerUrl": "ws://127.0.0.1:9333/devtools/page/C"},
+        ]);
+        assert_eq!(pick_target_with_url(&list, "about:blank").as_deref(), Some("ws://127.0.0.1:9333/devtools/page/B"));
+        assert_eq!(pick_target_with_url(&list, "https://example.com/").as_deref(), Some("ws://127.0.0.1:9333/devtools/page/A"));
+        // No tab has this URL: None, so the caller falls back to `pick_page_target`.
+        assert_eq!(pick_target_with_url(&list, "https://other.example/"), None);
+        assert_eq!(pick_target_with_url(&json!([]), "about:blank"), None);
+        assert_eq!(pick_target_with_url(&json!({"type": "page"}), "about:blank"), None, "not a list");
     }
 
     #[test]

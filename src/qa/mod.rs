@@ -76,11 +76,26 @@ pub struct QaConfig {
     pub wall_clock_s: u64,
     pub model: String,
     pub api_key: Option<String>,
+    /// `Some` = a `--device` run: the loop drives Chrome on a real device (or emulator) and has
+    /// one viewport, [`DEVICE_VIEWPORT`]. Holds the device's report label
+    /// (`AVD mini-qa (emulator-5554), Android 16`); `run_qa_device` sets it once the device is
+    /// chosen. `None` = the WebView2 lane.
+    pub device: Option<String>,
 }
 
 impl QaConfig {
     pub fn steps(&self) -> usize {
         self.steps.clamp(1, 200)
+    }
+
+    /// The viewports this run visits, in order: the three emulated ones, or the device's own
+    /// screen.
+    pub fn viewports(&self) -> Vec<Viewport> {
+        if self.device.is_some() {
+            vec![DEVICE_VIEWPORT]
+        } else {
+            VIEWPORTS.to_vec()
+        }
     }
 
     /// True when Jev drives controls at this viewport (else the viewport is probe-only).
@@ -106,11 +121,33 @@ pub const VIEWPORTS: [Viewport; 3] = [
     Viewport { name: "tablet", width: 768, height: 1024, dsf: 2.0, mobile: true },
     Viewport { name: "desktop", width: 1440, height: 900, dsf: 1.0, mobile: false },
 ];
+/// The single viewport of a `--device` run: the real screen, nothing emulated. The size fields
+/// are unused (`width` 0 means "whatever the page measures": see `agent::viewport_width`).
+pub const DEVICE_VIEWPORT: Viewport = Viewport { name: "device", width: 0, height: 0, dsf: 0.0, mobile: true };
 /// Viewports Jev explores (clicks, types) when `--explore` is not given. Phone first: a
 /// page is met as a phone user meets it, and the desktop pass is the second opinion.
 pub const DEFAULT_EXPLORE: &[&str] = &["phone", "desktop"];
 /// Wall-clock seconds added for every explored viewport beyond the first.
 pub const EXTRA_WALL_CLOCK_S: u64 = 120;
+
+/// The `--explore` list for the lane the run uses, or the reason the flags cannot run together.
+/// `requested` is the parsed `--explore` (`None` = not given, `Some([])` = `none`). The WebView2
+/// lane knows phone, tablet and desktop; the device lane has one viewport, `device`.
+pub fn explore_for_lane(device: bool, allow_writes: bool, requested: Option<Vec<String>>) -> Result<Vec<String>, String> {
+    if device && allow_writes {
+        return Err("service-worker writes are not intercepted on a device; --allow-writes is refused with --device".to_string());
+    }
+    let (known, default): (Vec<&str>, Vec<&str>) = if device {
+        (vec![DEVICE_VIEWPORT.name], vec![DEVICE_VIEWPORT.name])
+    } else {
+        (VIEWPORTS.iter().map(|v| v.name).collect(), DEFAULT_EXPLORE.to_vec())
+    };
+    let list = requested.unwrap_or_else(|| default.iter().map(|name| name.to_string()).collect());
+    match list.iter().find(|name| !known.contains(&name.as_str())) {
+        Some(bad) => Err(format!("--explore names an unknown viewport {bad} ({})", known.join(", "))),
+        None => Ok(list),
+    }
+}
 
 // ---------------------------------------------------------------- I/O seams
 
@@ -158,6 +195,19 @@ pub trait Browser: Send + Sync {
     fn engine_label(&self) -> Option<String> {
         None
     }
+    /// Epoch milliseconds on the clock of the page's own timestamps (the recorder's `t`, which is
+    /// `performance.timeOrigin + performance.now()`). The loop stamps steps and facts with it, so
+    /// "this fact landed right after that step" is a subtraction. A remote device's clock can
+    /// differ from this machine's by seconds, so a remote transport answers with its own; the
+    /// default is this machine's.
+    fn clock_ms(&self) -> u64 {
+        epoch_ms()
+    }
+}
+
+/// Epoch milliseconds on this machine's clock.
+pub fn epoch_ms() -> u64 {
+    std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_millis() as u64).unwrap_or(0)
 }
 
 /// Jev. `body` is a complete `/v1/systemone` request; the return value is the
@@ -445,6 +495,8 @@ pub struct QaReport {
     pub section: Option<String>,
     pub claims: Vec<String>,
     pub engine: String,
+    /// `--device` runs: the device the pass ran on (`AVD mini-qa (emulator-5554), Android 16`).
+    pub device: Option<String>,
     pub model: String,
     pub writes: &'static str,
     pub steps_budget: usize,
@@ -479,4 +531,45 @@ pub fn parse_js<T: serde::de::DeserializeOwned>(raw: &str) -> Result<T, String> 
         return Err(msg.to_string());
     }
     serde_json::from_value(value).map_err(|e| format!("unexpected payload: {e}"))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn list(names: &[&str]) -> Option<Vec<String>> {
+        Some(names.iter().map(|s| s.to_string()).collect())
+    }
+
+    #[test]
+    fn the_webview_lane_keeps_its_defaults_and_viewport_names() {
+        assert_eq!(explore_for_lane(false, false, None).unwrap(), vec!["phone", "desktop"]);
+        assert_eq!(explore_for_lane(false, true, list(&["tablet"])).unwrap(), vec!["tablet"]);
+        assert!(explore_for_lane(false, false, list(&[])).unwrap().is_empty(), "--explore none");
+        let err = explore_for_lane(false, false, list(&["device"])).unwrap_err();
+        assert_eq!(err, "--explore names an unknown viewport device (phone, tablet, desktop)");
+    }
+
+    #[test]
+    fn the_device_lane_explores_the_device_by_default() {
+        assert_eq!(explore_for_lane(true, false, None).unwrap(), vec!["device"]);
+        assert_eq!(explore_for_lane(true, false, list(&["device"])).unwrap(), vec!["device"]);
+        assert!(explore_for_lane(true, false, list(&[])).unwrap().is_empty(), "--explore none probes only");
+    }
+
+    #[test]
+    fn the_device_lane_refuses_the_webview_viewports() {
+        for name in ["phone", "tablet", "desktop"] {
+            let err = explore_for_lane(true, false, list(&[name])).unwrap_err();
+            assert_eq!(err, format!("--explore names an unknown viewport {name} (device)"));
+        }
+        assert!(explore_for_lane(true, false, list(&["device", "phone"])).is_err());
+    }
+
+    #[test]
+    fn the_device_lane_refuses_allow_writes() {
+        let err = explore_for_lane(true, true, None).unwrap_err();
+        assert_eq!(err, "service-worker writes are not intercepted on a device; --allow-writes is refused with --device");
+        assert!(explore_for_lane(false, true, None).is_ok(), "the WebView2 lane still allows writes");
+    }
 }

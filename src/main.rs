@@ -801,11 +801,13 @@ struct QaCliArgs {
     allow_writes: bool,
     steps: Option<usize>,
     explore: Option<Vec<String>>,
+    /// `--device auto|emulator|<serial>`: run the loop in Chrome for Android.
+    device: Option<String>,
 }
 
 /// Parses `--qa <url> [--section <name>] [--claim <text>]... [--out <dir>]
-/// [--allow-writes] [--steps N] [--explore phone,desktop|none]`. `qa_index` is the
-/// position of `--qa` itself.
+/// [--allow-writes] [--steps N] [--explore phone,desktop|none] [--device auto|emulator|<serial>]`.
+/// `qa_index` is the position of `--qa` itself.
 fn parse_qa_args(args: &[String], qa_index: usize) -> QaCliArgs {
     let url = args.get(qa_index + 1).cloned().unwrap_or_default();
     let mut out = QaCliArgs {
@@ -816,6 +818,7 @@ fn parse_qa_args(args: &[String], qa_index: usize) -> QaCliArgs {
         allow_writes: false,
         steps: None,
         explore: None,
+        device: None,
     };
     let mut i = qa_index + 2;
     while i < args.len() {
@@ -848,6 +851,17 @@ fn parse_qa_args(args: &[String], qa_index: usize) -> QaCliArgs {
                 });
                 i += 2;
             }
+            "--device" => match args.get(i + 1).filter(|v| !v.starts_with("--")) {
+                Some(value) => {
+                    out.device = Some(value.clone());
+                    i += 2;
+                }
+                // `--device` alone, or followed by another flag: the first online device.
+                None => {
+                    out.device = Some("auto".to_string());
+                    i += 1;
+                }
+            },
             _ => i += 1, // ignore unrelated flags (--debug, --i-know-this-is-prod, ...)
         }
     }
@@ -908,16 +922,11 @@ fn run_qa(args: &[String], qa_index: usize) -> ! {
     let model = qa::jev::model();
     let out_dir = cli.out.clone().unwrap_or_else(|| qa_out_dir(&host));
 
-    let explore: Vec<String> = cli
-        .explore
-        .clone()
-        .unwrap_or_else(|| qa::DEFAULT_EXPLORE.iter().map(|s| s.to_string()).collect());
-    for v in &explore {
-        if !qa::VIEWPORTS.iter().any(|vp| vp.name == v) {
-            eprintln!("mini --qa: --explore names an unknown viewport {v} (phone, tablet, desktop)");
-            std::process::exit(2);
-        }
-    }
+    // The lane decides the viewport names, the default list, and whether writes can be allowed.
+    let explore = qa::explore_for_lane(cli.device.is_some(), cli.allow_writes, cli.explore.clone()).unwrap_or_else(|e| {
+        eprintln!("mini --qa: {e}");
+        std::process::exit(2);
+    });
     let wall_clock_s = qa::DEFAULT_WALL_CLOCK_S + qa::EXTRA_WALL_CLOCK_S * (explore.len().saturating_sub(1) as u64);
 
     let cfg = qa::QaConfig {
@@ -932,7 +941,13 @@ fn run_qa(args: &[String], qa_index: usize) -> ! {
         wall_clock_s,
         model,
         api_key,
+        device: None,
     };
+
+    // Chrome on a device: no WebView2 shell, and the QA profile reset is for that shell only.
+    if let Some(device) = cli.device.clone() {
+        run_qa_device(cfg, &device);
+    }
 
     profile::reset_qa_profile();
     let debug_flag = args.iter().any(|a| a == "--debug");
@@ -953,6 +968,62 @@ fn run_qa(args: &[String], qa_index: usize) -> ! {
     );
 
     run_qa_event_loop(shell, state, Some(abort_cfg));
+}
+
+/// `mini --qa <url> --device auto|emulator|<serial>`: the same QA loop in Chrome for Android over
+/// adb and CDP. No WebView2 shell and no QA profile reset: the device keeps its own profile
+/// (`RemoteBrowser` clears cookies and cache over CDP). Never returns: the loop's exit code, or 2
+/// when the device cannot be reached.
+fn run_qa_device(cfg: qa::QaConfig, device: &str) -> ! {
+    let fail = |msg: String| -> ! {
+        eprintln!("mini --qa --device: {msg}");
+        std::process::exit(2)
+    };
+    let devices = android::devices().unwrap_or_else(|e| fail(e));
+    let serial = match android::choose(&devices, device) {
+        Ok(d) => d.serial,
+        // Only `emulator` starts something: `auto` never boots an emulator by itself.
+        Err(e) if device == "emulator" => {
+            let avd = std::env::var("MINI_AVD").unwrap_or_else(|_| "mini-qa".to_string());
+            eprintln!("mini --qa --device: {e}; booting AVD {avd} (headless; MINI_EMU_WINDOW=1 shows it)");
+            android::boot_emulator(&avd, std::time::Duration::from_secs(240)).unwrap_or_else(|e| fail(e))
+        }
+        Err(e) => fail(e),
+    };
+    match android::chrome_present(&serial) {
+        Ok(true) => {}
+        Ok(false) => fail(format!("Chrome is not installed on {serial}: use a google_apis_playstore AVD or a phone with Chrome")),
+        Err(e) => fail(e),
+    }
+    // A loopback URL is the laptop's server: the device reaches it through `adb reverse`.
+    if let Some(port) = android::loopback_port(&cfg.url) {
+        android::reverse_port(&serial, port).unwrap_or_else(|e| fail(e));
+    }
+    android::launch_chrome(&serial, "about:blank").unwrap_or_else(|e| fail(e));
+    let port: u16 = std::env::var("MINI_DEVICE_PORT").ok().and_then(|p| p.parse().ok()).unwrap_or(9333);
+    android::forward_devtools(&serial, port).unwrap_or_else(|e| fail(e));
+    // Chrome serves DevTools only once it runs a tab, so wait for it instead of sleeping.
+    android::wait_for_devtools(port, std::time::Duration::from_secs(15)).unwrap_or_else(|e| fail(e));
+    let ws = cdp::page_ws_url_for(port, "about:blank").unwrap_or_else(|e| fail(e));
+    let label = android::facts(&serial);
+    eprintln!("mini --qa --device: {label}; Chrome DevTools on 127.0.0.1:{port}");
+    // `--allow-writes` is refused with `--device` (`qa::explore_for_lane`): writes stay blocked.
+    let policy = qa::firewall::FirewallPolicy { allow_writes: false, host: cfg.host.clone() };
+    let session = cfg.out_dir.join("device-session");
+    let browser = qa::remote::RemoteBrowser::connect(&ws, policy, &label, session).unwrap_or_else(|e| fail(e));
+    // Steps and facts are stamped on the device's clock; an emulator can run seconds off this machine's.
+    eprintln!("mini --qa --device: device clock is {:+} ms from this machine's", browser.clock_offset_ms());
+    let cfg = qa::QaConfig { device: Some(label), ..cfg };
+    let judge = qa::jev::JevClient::new(cfg.api_key.clone().expect("checked above"), cfg.model.clone());
+    // A panic still leaves a report, as on the WebView2 lane (`spawn_qa_thread`).
+    let code = match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| qa::agent::run(&cfg, &browser, &judge))) {
+        Ok(code) => code,
+        Err(_) => {
+            eprintln!("mini: QA run panicked");
+            qa::agent::write_aborted_report(&cfg, "the QA run panicked")
+        }
+    };
+    std::process::exit(code)
 }
 
 /// `mini --qa-spike <url>`: diagnostic that exercises the six bridge
@@ -1197,4 +1268,30 @@ fn spike_checks(bridge: &qa::bridge::UiBridge, url: &str, policy: qa::firewall::
 
 fn json_url(url: &str) -> serde_json::Value {
     serde_json::json!({ "url": url })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn args(list: &[&str]) -> Vec<String> {
+        list.iter().map(|s| s.to_string()).collect()
+    }
+
+    #[test]
+    fn qa_device_flag_takes_a_value_or_means_auto() {
+        let cli = parse_qa_args(&args(&["mini", "--qa", "http://x/", "--device", "emulator", "--steps", "4"]), 1);
+        assert_eq!(cli.device.as_deref(), Some("emulator"));
+        assert_eq!(cli.steps, Some(4), "the flag after the value still parses");
+        let cli = parse_qa_args(&args(&["mini", "--qa", "http://x/", "--device", "1A2B3C4D"]), 1);
+        assert_eq!(cli.device.as_deref(), Some("1A2B3C4D"));
+        // No value (last argument, or another flag next): auto.
+        let cli = parse_qa_args(&args(&["mini", "--qa", "http://x/", "--device"]), 1);
+        assert_eq!(cli.device.as_deref(), Some("auto"));
+        let cli = parse_qa_args(&args(&["mini", "--qa", "http://x/", "--device", "--steps", "6"]), 1);
+        assert_eq!(cli.device.as_deref(), Some("auto"), "a flag is not a device name");
+        assert_eq!(cli.steps, Some(6));
+        // No flag, no device lane.
+        assert!(parse_qa_args(&args(&["mini", "--qa", "http://x/"]), 1).device.is_none());
+    }
 }
