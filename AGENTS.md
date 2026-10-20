@@ -5,7 +5,7 @@ code, Jev (api.typesafe.ai) for severity and claims, and a report that makes an
 "it's done" claim falsifiable.
 
 ```
-target\debug\mini.exe --qa <url> [--section "<name>"] [--claim "<text>"]... [--out <dir>] [--steps N] [--allow-writes]
+target\debug\mini.exe --qa <url> [--section "<name>"] [--claim "<text>"]... [--out <dir>] [--steps N] [--explore <list>] [--allow-writes]
 ```
 
 - Exit 0 clean · 1 findings at severity ≥ 2 or an unverified claim · 2 could not
@@ -27,10 +27,48 @@ target\debug\mini.exe --qa <url> [--section "<name>"] [--claim "<text>"]... [--o
   key exits 2 before any window opens. No CDP port is opened, and no new content IPC exists — the page
   is driven host→page through `window.__miniQA.*` (injected from `tools/qa-*.js`)
   and in-process WebView2 CDP.
+- Viewports run in this order: phone 390x844 (device scale factor 3), tablet
+  768x1024 (2), desktop 1440x900 (1). Each viewport starts with a fresh
+  `Page.navigate` of the URL. `--section` is resolved again at each later
+  viewport (one more Jev section question each). If the first viewport found no
+  region, the later viewports judge the whole page.
+- `--explore <list>` sets the viewports where Jev explores (clicks, taps,
+  typing). `<list>` is a comma list of `phone`, `tablet`, `desktop`. Default:
+  `phone,desktop`. `none` = probe-only at every viewport (facts computed in
+  code, no input). An unknown name exits 2. A viewport that is not in the list
+  is probed only. `--steps N` is the step budget for each explored viewport.
+  The wall clock is 240 s, plus 120 s for each explored viewport after the
+  first (360 s by default).
+- Phone and tablet are touch viewports. They get touch emulation
+  (`Emulation.setTouchEmulationEnabled`) and an Android Chrome user agent
+  (`Emulation.setUserAgentOverride`). A CLICK is sent as
+  `Input.dispatchTouchEvent` (touchStart, touchEnd), not as a mouse event.
+  Desktop clears the user agent override (empty `userAgent`) and clicks with
+  the mouse. This is emulation in WebView2, not a real phone: Android-only
+  behaviour (browser bar resize, soft keyboard, back gesture) is out of scope.
+- Two tap-flow rules run in code after each explored step that sends input, on
+  a touch viewport (`src/qa/mobile.rs`; page side `window.__miniQA.mobileState()`
+  in `tools/qa-probe.js`). No Jev call is involved. A finding from these rules
+  has severity 2 and fails the run. The evidence is the step screenshot.
+  `scroll-lock-leaked`: `body` or `html` has `overflow-y` hidden or clip, no
+  dialog or large fixed layer is open, and the document is taller than the
+  viewport. `overlay-across-navigation`: an overlay was open before the step
+  and is still open after the path changed. A lock that stays leaked is one
+  finding, kept at the step that caused it.
+- Screenshots: `shots/<viewport>.jpg` for each viewport and
+  `shots/<viewport>-step-NN.jpg` for each exploration step.
+- Fixture for the tap-flow rules: `tools/fixtures/mobile.html`. Run
+  `python -m http.server 8000` in `tools/fixtures`, then
+  `target\debug\mini.exe --qa http://127.0.0.1:8000/mobile.html --steps 6`.
+  Expected: exit 1 and a `Scroll lock leaked` finding at phone. If Jev does
+  not open the sheet in 6 steps, use `--steps 10`.
 - One engine only (WebView2/Chromium): visual-only regressions and non-Chromium
   differences are out of scope. Screenshots are attached so a human can look.
-- Diagnostic: `--qa-spike <url>` exercises the five transport capabilities
-  (eval, viewport, screenshot, click, firewall) and prints one JSON line each.
+- Diagnostic: `--qa-spike <url>` exercises the six transport capabilities
+  (eval, viewport, screenshot, click, firewall, touch) and prints one JSON line
+  each. The `touch` line checks touch points, a coarse pointer and the Android
+  user agent at phone size, a tap that fires `touchstart` and ends in a click,
+  and the restore at desktop size.
 
 # Debugging Mini pages: use the built-in debug mode, not Playwright
 

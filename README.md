@@ -118,12 +118,20 @@ So agents that start Mini from a fresh shell need no setup. Mini never prints th
 target\debug\mini.exe --qa https://example.com --claim "The pricing table shows three plans"
 ```
 
-Opens the URL, walks it at desktop / tablet / phone, exercises the controls it
+Opens the URL, walks it at phone / tablet / desktop, exercises the controls it
 finds (never submitting anything — writes are refused at the network layer,
 write-like controls are never clicked, and ambiguous clicks are gated by a
 model vote), and writes `report.md`, `report.json`, screenshots and the raw
 evidence streams to `%LOCALAPPDATA%\Mini\QA\<stamp>-<host>\`. Exit code `0` =
 clean, `1` = findings or an unverified claim, `2` = the run could not happen.
+
+Viewports run phone (390x844), tablet, desktop. Jev explores (taps, clicks) at
+the viewports in `--explore <list>` (default `phone,desktop`; `none` =
+probe-only). Phone and tablet get touch emulation, an Android user agent and
+touch taps. Two tap-flow rules computed in code (scroll lock leaked, overlay
+across navigation) run after each explored step and fail the run at severity 2.
+Step screenshots are `shots/<viewport>-step-NN.jpg`. The wall clock is 240 s
+plus 120 s for each explored viewport after the first.
 
 Needs a Jev key (see [Jev API key](#jev-api-key)). Single engine (WebView2/Chromium):
 visual-only regressions and non-Chromium differences are out of scope — the

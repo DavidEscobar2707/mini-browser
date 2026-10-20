@@ -110,6 +110,18 @@ fn render_header(r: &QaReport, out: &mut String) {
     out.push_str(&format!("- Writes: {}\n", r.writes));
     out.push_str(&format!("- Model: {}\n", r.model));
     out.push_str(&format!("- Steps budget: {}\n", r.steps_budget));
+    let viewports: Vec<String> = r
+        .viewports
+        .iter()
+        .map(|v| {
+            if v.explored {
+                format!("{} (explored)", v.viewport)
+            } else {
+                v.viewport.clone()
+            }
+        })
+        .collect();
+    out.push_str(&format!("- Viewports: {}\n", viewports.join(", ")));
     out.push_str(&format!("- Artifacts: {}\n", r.out_dir.display()));
     out.push('\n');
     out.push_str(
@@ -570,6 +582,15 @@ mod tests {
         let r = base_report(vec![ok_viewport("desktop")]);
         let md = render_md(&r);
         assert!(md.contains("- Section: (whole page)"));
+    }
+
+    #[test]
+    fn header_lists_viewports_in_run_order_with_explored_marks() {
+        let mut phone = ok_viewport("phone");
+        phone.explored = true;
+        let r = base_report(vec![phone, ok_viewport("tablet")]);
+        let md = render_md(&r);
+        assert!(md.contains("- Viewports: phone (explored), tablet"), "{md}");
     }
 
     #[test]
