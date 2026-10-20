@@ -6,6 +6,7 @@ mod profile;
 mod analyze;
 mod qa;
 mod cdp;
+mod cdp_bus;
 mod move_cmd;
 mod episodes;
 mod affordance;
