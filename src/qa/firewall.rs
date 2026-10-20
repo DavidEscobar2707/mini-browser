@@ -195,8 +195,17 @@ pub fn global_controls(els: &[ObservedElement]) -> Vec<ObservedElement> {
 
 fn is_offsite_link(el: &ObservedElement, host: &str) -> bool {
     match el.href_host.as_deref() {
-        Some(h) => !same_site(host, h),
+        // `href_host` is the URL's `host`, port included; `host` is a bare hostname.
+        Some(h) => !same_site(host, strip_port(h)),
         None => false,
+    }
+}
+
+/// `127.0.0.1:8000` -> `127.0.0.1`; anything that does not end in `:<digits>` is unchanged.
+fn strip_port(authority: &str) -> &str {
+    match authority.rsplit_once(':') {
+        Some((h, port)) if !port.is_empty() && port.bytes().all(|b| b.is_ascii_digit()) => h,
+        _ => authority,
     }
 }
 
@@ -424,6 +433,18 @@ mod tests {
 
         let candidates = candidate_elements(&[same_site_link], "example.com");
         assert_eq!(candidates.len(), 1);
+    }
+
+    #[test]
+    fn candidate_elements_keeps_a_same_host_link_that_carries_a_port() {
+        // The snapshot reports `new URL(href).host`, port included (`127.0.0.1:8000`);
+        // the QA target host is a bare hostname.
+        let mut link = visible_el("click");
+        link.label = "About".into();
+        link.href_host = Some("127.0.0.1:8000".into());
+        assert_eq!(candidate_elements(&[link.clone()], "127.0.0.1").len(), 1);
+        link.href_host = Some("other.tld:8000".into());
+        assert!(candidate_elements(&[link], "127.0.0.1").is_empty(), "a port never makes another host same-site");
     }
 
     #[test]
