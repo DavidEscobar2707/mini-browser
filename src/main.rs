@@ -840,10 +840,12 @@ struct QaCliArgs {
     out: Option<std::path::PathBuf>,
     allow_writes: bool,
     steps: Option<usize>,
+    explore: Option<Vec<String>>,
 }
 
 /// Parses `--qa <url> [--section <name>] [--claim <text>]... [--out <dir>]
-/// [--allow-writes] [--steps N]`. `qa_index` is the position of `--qa` itself.
+/// [--allow-writes] [--steps N] [--explore phone,desktop|none]`. `qa_index` is the
+/// position of `--qa` itself.
 fn parse_qa_args(args: &[String], qa_index: usize) -> QaCliArgs {
     let url = args.get(qa_index + 1).cloned().unwrap_or_default();
     let mut out = QaCliArgs {
@@ -853,6 +855,7 @@ fn parse_qa_args(args: &[String], qa_index: usize) -> QaCliArgs {
         out: None,
         allow_writes: false,
         steps: None,
+        explore: None,
     };
     let mut i = qa_index + 2;
     while i < args.len() {
@@ -877,6 +880,12 @@ fn parse_qa_args(args: &[String], qa_index: usize) -> QaCliArgs {
             }
             "--steps" => {
                 out.steps = args.get(i + 1).and_then(|s| s.parse::<usize>().ok());
+                i += 2;
+            }
+            "--explore" => {
+                out.explore = args.get(i + 1).map(|s| {
+                    s.split(',').map(|v| v.trim().to_string()).filter(|v| v != "none" && !v.is_empty()).collect()
+                });
                 i += 2;
             }
             _ => i += 1, // ignore unrelated flags (--debug, --i-know-this-is-prod, ...)
@@ -939,6 +948,18 @@ fn run_qa(args: &[String], qa_index: usize) -> ! {
     let model = qa::jev::model();
     let out_dir = cli.out.clone().unwrap_or_else(|| qa_out_dir(&host));
 
+    let explore: Vec<String> = cli
+        .explore
+        .clone()
+        .unwrap_or_else(|| qa::DEFAULT_EXPLORE.iter().map(|s| s.to_string()).collect());
+    for v in &explore {
+        if !qa::VIEWPORTS.iter().any(|vp| vp.name == v) {
+            eprintln!("mini --qa: --explore names an unknown viewport {v} (phone, tablet, desktop)");
+            std::process::exit(2);
+        }
+    }
+    let wall_clock_s = qa::DEFAULT_WALL_CLOCK_S + qa::EXTRA_WALL_CLOCK_S * (explore.len().saturating_sub(1) as u64);
+
     let cfg = qa::QaConfig {
         url: cli.url,
         host: host.clone(),
@@ -947,7 +968,8 @@ fn run_qa(args: &[String], qa_index: usize) -> ! {
         out_dir,
         allow_writes: cli.allow_writes,
         steps: cli.steps.unwrap_or(qa::DEFAULT_STEPS),
-        wall_clock_s: qa::DEFAULT_WALL_CLOCK_S,
+        explore,
+        wall_clock_s,
         model,
         api_key,
     };
@@ -1040,6 +1062,12 @@ fn click_element(bridge: &qa::bridge::UiBridge, id: &str) -> Option<bool> {
     Some(bridge.mouse_click(x, y).is_ok())
 }
 
+/// A QA viewport by name: `qa::VIEWPORTS` is in run order (phone first), so the
+/// spike must not index it by position.
+fn viewport_named(name: &str) -> qa::Viewport {
+    *qa::VIEWPORTS.iter().find(|v| v.name == name).expect("known QA viewport")
+}
+
 fn spike_checks(bridge: &qa::bridge::UiBridge, url: &str, policy: qa::firewall::FirewallPolicy) -> i32 {
     let _ = &policy;
     let mut all_ok = true;
@@ -1075,7 +1103,7 @@ fn spike_checks(bridge: &qa::bridge::UiBridge, url: &str, policy: qa::firewall::
     }));
 
     // 2. viewport: 390x844 dsf 3 mobile, verified via window.innerWidth.
-    let phone = qa::VIEWPORTS[2];
+    let phone = viewport_named("phone");
     let vp_result = bridge.set_viewport(phone);
     let vp_mechanism = bridge.viewport_mechanism();
     let inner_w = bridge.eval("window.innerWidth");
@@ -1108,7 +1136,7 @@ fn spike_checks(bridge: &qa::bridge::UiBridge, url: &str, policy: qa::firewall::
 
     // Desktop viewport again so the fixture's element rects are predictable
     // for the click checks below.
-    let _ = bridge.set_viewport(qa::VIEWPORTS[0]);
+    let _ = bridge.set_viewport(viewport_named("desktop"));
 
     // 4. click: a real CDP click increments the fixture's counter 0 -> 1.
     let before = read_counter(bridge);

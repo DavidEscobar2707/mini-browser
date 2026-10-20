@@ -1,4 +1,4 @@
-//! The QA loop: per viewport settle -> probe -> (desktop) explore -> triage ->
+//! The QA loop: per viewport settle -> probe -> explore (cfg.explore only) -> triage ->
 //! claims -> report. Ports `jev_ultrafast/agent.py`'s tick/predict/act shape.
 //!
 //! One clock basis throughout: epoch milliseconds. The recorder's `t` is
@@ -148,8 +148,8 @@ pub fn execute(cfg: &QaConfig, browser: &dyn Browser, judge: &dyn Judge) -> QaRe
 
     for (i, vp) in VIEWPORTS.iter().enumerate() {
         let mut facts = ViewportFacts { viewport: vp.name.to_string(), ..Default::default() };
-        // Step attribution is per viewport: exploration only runs at desktop, and
-        // a tablet fact must never inherit a desktop step number.
+        // Step attribution is per viewport: exploration only runs at the viewports
+        // in cfg.explore, and a tablet fact must never inherit a phone step number.
         pass.step_marks.clear();
         if let Some(reason) = &fatal {
             facts.nav_failed = Some(reason.clone());
@@ -250,14 +250,15 @@ pub fn execute(cfg: &QaConfig, browser: &dyn Browser, judge: &dyn Judge) -> QaRe
         facts.screenshot = pass.shot(&format!("{}.jpg", vp.name));
         facts.probe = probe;
 
-        // 5. Claims, before exploration mutates the page (desktop explores later).
+        // 5. Claims, before exploration mutates the page (exploration comes later).
         if !cfg.claims.is_empty() {
             facts.claims = pass.claims(vp, &observation, facts.probe.as_ref());
         }
 
-        // 6. Exploration: desktop only, and never on a page that exists to log
-        // in, check out or delete something.
-        if vp.name == "desktop" {
+        // 6. Exploration: the viewports listed in cfg.explore, and never on a page
+        // that exists to log in, check out or delete something.
+        if cfg.explores(vp.name) {
+            facts.explored = true;
             if firewall::is_forbidden_page(&observation.url) {
                 pass.note(format!(
                     "exploration skipped: {} is a login/checkout/account page",
@@ -393,7 +394,7 @@ struct Staged {
     finding: Finding,
 }
 
-/// What one desktop exploration produced.
+/// What one exploration pass produced.
 #[derive(Default)]
 struct Exploration {
     steps: Vec<StepRecord>,
@@ -1879,6 +1880,7 @@ mod tests {
             out_dir: browser.root.join("out"),
             allow_writes: false,
             steps: 4,
+            explore: vec!["phone".to_string(), "desktop".to_string()],
             wall_clock_s: 60,
             model: crate::qa::DEFAULT_MODEL.to_string(),
             api_key: Some("test".to_string()),
@@ -1919,10 +1921,35 @@ mod tests {
         let browser = FakeBrowser::new("labels");
         let judge = ScriptedJudge::with(&["DONE"]);
         let report = executed(&browser, &judge);
-        assert_eq!(*browser.labels.lock(), vec!["desktop", "tablet", "phone"]);
-        assert_eq!(*browser.viewports.lock(), vec!["desktop", "tablet", "phone"]);
+        assert_eq!(*browser.labels.lock(), vec!["phone", "tablet", "desktop"]);
+        assert_eq!(*browser.viewports.lock(), vec!["phone", "tablet", "desktop"]);
         assert_eq!(report.viewports.len(), 3);
         assert!(report.viewports.iter().all(|v| v.probe.is_some()));
+    }
+
+    #[test]
+    fn exploration_runs_at_every_listed_viewport_and_marks_it() {
+        let browser = FakeBrowser::new("explore-list");
+        let judge = ScriptedJudge::with(&["CLICK", "DONE", "CLICK", "DONE"]);
+        let report = executed(&browser, &judge);
+        let phone = report.viewports.iter().find(|v| v.viewport == "phone").unwrap();
+        let tablet = report.viewports.iter().find(|v| v.viewport == "tablet").unwrap();
+        let desktop = report.viewports.iter().find(|v| v.viewport == "desktop").unwrap();
+        assert!(phone.explored && desktop.explored && !tablet.explored);
+        assert_eq!(phone.steps.len(), 2, "{:?}", phone.steps);
+        assert_eq!(desktop.steps.len(), 2, "{:?}", desktop.steps);
+        assert!(tablet.steps.is_empty());
+    }
+
+    #[test]
+    fn explore_none_keeps_every_viewport_probe_only() {
+        let browser = FakeBrowser::new("explore-none");
+        let judge = ScriptedJudge::with(&["CLICK", "DONE"]);
+        let mut cfg = config(&browser);
+        cfg.explore.clear();
+        let report = execute(&cfg, &browser, &judge);
+        assert!(report.viewports.iter().all(|v| !v.explored && v.steps.is_empty()));
+        assert!(browser.clicks.lock().is_empty());
     }
 
     #[test]
@@ -1937,8 +1964,8 @@ mod tests {
         assert!(report::write(&report).is_ok());
         assert!(report.out_dir.join("report.md").exists());
         assert!(report.out_dir.join("report.json").exists());
-        assert!(report.viewports[0].run_dir.as_deref() == Some("runs/run-desktop"));
-        assert!(report.out_dir.join("runs/run-desktop/frontend.jsonl").exists());
+        assert!(report.viewports[0].run_dir.as_deref() == Some("runs/run-phone"));
+        assert!(report.out_dir.join("runs/run-phone/frontend.jsonl").exists());
     }
 
     #[test]
@@ -1955,7 +1982,7 @@ mod tests {
             .expect("the console error should be reported");
         assert_eq!(finding.severity, 3);
         assert_eq!(finding.severity_source, SeveritySource::Jev);
-        assert_eq!(finding.evidence, vec!["runs/run-desktop/frontend.jsonl:1".to_string()]);
+        assert_eq!(finding.evidence, vec!["runs/run-phone/frontend.jsonl:1".to_string()]);
         assert_eq!(report::verdict(&report).exit_code, 1);
     }
 
@@ -1971,7 +1998,7 @@ mod tests {
             .find(|f| f.kind == FindingKind::FailedRequest)
             .expect("the 500 should be reported");
         assert!(finding.title.contains("500"), "{}", finding.title);
-        assert!(finding.evidence[0].starts_with("runs/run-desktop/net.jsonl"));
+        assert!(finding.evidence[0].starts_with("runs/run-phone/net.jsonl"));
     }
 
     #[test]

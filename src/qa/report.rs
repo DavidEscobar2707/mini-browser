@@ -445,6 +445,7 @@ mod tests {
     fn ok_viewport(name: &str) -> ViewportFacts {
         ViewportFacts {
             viewport: name.to_string(),
+            explored: false,
             run_dir: Some(format!("{name}-run")),
             nav_failed: None,
             probe: Some(ProbeReport::default()),
@@ -701,6 +702,7 @@ mod tests {
 
         let desktop = ViewportFacts {
             viewport: "desktop".into(),
+            explored: false,
             run_dir: Some("desktop-run".into()),
             nav_failed: None,
             probe: Some(ProbeReport::default()),
@@ -831,6 +833,7 @@ mod tests {
 
         let phone = ViewportFacts {
             viewport: "phone".into(),
+            explored: false,
             run_dir: Some("phone-run".into()),
             nav_failed: None,
             probe: Some(ProbeReport::default()),

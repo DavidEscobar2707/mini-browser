@@ -27,7 +27,7 @@ pub mod report;
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 
-/// Default step budget for the desktop exploration pass.
+/// Default step budget for each explored viewport.
 pub const DEFAULT_STEPS: usize = 25;
 /// Default wall-clock budget for the whole run, seconds (SPEC: 4 minutes).
 pub const DEFAULT_WALL_CLOCK_S: u64 = 240;
@@ -65,6 +65,9 @@ pub struct QaConfig {
     /// false (default): every non-GET/HEAD/OPTIONS request is failed by the firewall.
     pub allow_writes: bool,
     pub steps: usize,
+    /// Viewports Jev explores (clicks, types). Every other viewport is probe-only;
+    /// empty = probe-only everywhere (`--explore none`).
+    pub explore: Vec<String>,
     pub wall_clock_s: u64,
     pub model: String,
     pub api_key: Option<String>,
@@ -73,6 +76,11 @@ pub struct QaConfig {
 impl QaConfig {
     pub fn steps(&self) -> usize {
         self.steps.clamp(1, 200)
+    }
+
+    /// True when Jev drives controls at this viewport (else the viewport is probe-only).
+    pub fn explores(&self, viewport: &str) -> bool {
+        self.explore.iter().any(|v| v == viewport)
     }
 }
 
@@ -87,11 +95,17 @@ pub struct Viewport {
     pub mobile: bool,
 }
 
+/// Run order, phone first. Look a viewport up by name, never by index.
 pub const VIEWPORTS: [Viewport; 3] = [
-    Viewport { name: "desktop", width: 1440, height: 900, dsf: 1.0, mobile: false },
-    Viewport { name: "tablet", width: 768, height: 1024, dsf: 2.0, mobile: true },
     Viewport { name: "phone", width: 390, height: 844, dsf: 3.0, mobile: true },
+    Viewport { name: "tablet", width: 768, height: 1024, dsf: 2.0, mobile: true },
+    Viewport { name: "desktop", width: 1440, height: 900, dsf: 1.0, mobile: false },
 ];
+/// Viewports Jev explores (clicks, types) when `--explore` is not given. Phone first: a
+/// page is met as a phone user meets it, and the desktop pass is the second opinion.
+pub const DEFAULT_EXPLORE: &[&str] = &["phone", "desktop"];
+/// Wall-clock seconds added for every explored viewport beyond the first.
+pub const EXTRA_WALL_CLOCK_S: u64 = 120;
 
 // ---------------------------------------------------------------- I/O seams
 
@@ -396,6 +410,8 @@ pub struct StepRecord {
 #[derive(Clone, Debug, Default, Serialize)]
 pub struct ViewportFacts {
     pub viewport: String,
+    /// Jev was allowed to drive controls here (see `QaConfig::explore`).
+    pub explored: bool,
     pub run_dir: Option<String>,
     pub nav_failed: Option<String>,
     pub probe: Option<ProbeReport>,
