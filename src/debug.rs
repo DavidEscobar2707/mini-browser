@@ -16,6 +16,14 @@ pub fn port() -> u16 {
     std::env::var("MINI_DEBUG_PORT").ok().and_then(|v| v.parse().ok()).unwrap_or(9222)
 }
 
+/// Debug mode only. Canonical source: tools/recorder.js (also injected into
+/// external Chromiums by tools/record.js, and over CDP into Chrome for Android
+/// by `qa::remote`). Its `post` prefers the __miniPost CDP binding and falls
+/// back to window.ipc: inside Mini only window.ipc exists, so everything ships
+/// as {"cmd":"debug","kind":...} lines; through the binding each call carries
+/// one such line.
+pub const RECORDER_SCRIPT: &str = include_str!("../tools/recorder.js");
+
 fn now_ms() -> u128 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -236,6 +244,8 @@ pub struct DebugRecorder {
     run_index: u32, // next run number to assign
     run: RunWriters,
     started_ms: u64,
+    /// false for `start_private`: `current.json` is never written or tombstoned.
+    publish: bool,
 }
 
 fn sanitize(label: &str) -> String {
@@ -304,9 +314,20 @@ impl DebugRecorder {
             run_index: 1,
             run,
             started_ms: now_ms() as u64,
+            publish: true,
         };
         rec.write_current();
         Some(rec)
+    }
+
+    /// A recorder that writes runs under `session_dir` and never touches
+    /// `current.json` (the device lane must not clobber a live debug window).
+    // `dead_code` until `qa::remote` (plan 010 B3) opens its recorder here.
+    #[allow(dead_code)]
+    pub fn start_private(session_dir: PathBuf) -> Option<DebugRecorder> {
+        std::fs::create_dir_all(&session_dir).ok()?;
+        let run = open_run(&session_dir, 0, "device", "")?;
+        Some(DebugRecorder { session_dir, run_index: 1, run, started_ms: now_ms() as u64, publish: false })
     }
 
     /// The active run's directory. Used by the QA bridge's `run_label` to
@@ -315,7 +336,13 @@ impl DebugRecorder {
         self.run.dir.clone()
     }
 
+    /// Where this recorder publishes `current.json`; `None` for a private one.
+    fn status_path(&self) -> Option<PathBuf> {
+        self.publish.then(current_path)
+    }
+
     fn write_status(&self, ready: bool) {
+        let Some(path) = self.status_path() else { return };
         let meta = status_json(
             &format!("http://127.0.0.1:{}", port()),
             std::process::id(),
@@ -326,7 +353,7 @@ impl DebugRecorder {
             Some(self.run.index),
             ready,
         );
-        let _ = std::fs::write(debug_root().join("current.json"), meta.to_string());
+        let _ = std::fs::write(path, meta.to_string());
     }
 
     fn write_current(&self) {
@@ -391,6 +418,56 @@ impl DebugRecorder {
     }
 }
 
+/// One recorder line as the page posts it: `{"cmd":"debug","kind":...}`, or a
+/// `{"cmd":"debug-batch","lines":[...]}` wrapping several of them.
+#[derive(serde::Deserialize)]
+struct RecorderLine {
+    cmd: String,
+    #[serde(default)]
+    kind: Option<String>,
+    #[serde(default)]
+    label: Option<String>,
+    #[serde(default)]
+    incident: Option<String>,
+    /// `debug-batch`: raw recorder lines, each a `{"cmd":"debug",...}` object.
+    #[serde(default)]
+    lines: Vec<String>,
+}
+
+/// Files one recorder line (or every `debug` line of a `debug-batch`) into its
+/// stream: `kind` dom, net, react, frame or mark has its own file, `run` rotates
+/// the run, anything else is frontend. Other commands and lines that do not
+/// parse are ignored.
+pub fn route_line(rec: &mut DebugRecorder, line: &str) {
+    if let Ok(c) = serde_json::from_str::<RecorderLine>(line) {
+        if c.cmd == "debug" || c.cmd == "debug-batch" {
+            route_parsed(rec, &c, line);
+        }
+    }
+}
+
+fn route_parsed(rec: &mut DebugRecorder, c: &RecorderLine, body: &str) {
+    if c.cmd == "debug-batch" {
+        for line in &c.lines {
+            if let Ok(inner) = serde_json::from_str::<RecorderLine>(line) {
+                if inner.cmd == "debug" {
+                    route_parsed(rec, &inner, line);
+                }
+            }
+        }
+        return;
+    }
+    match c.kind.as_deref() {
+        Some("dom") => rec.dom_line(body),
+        Some("net") => rec.net_line(body),
+        Some("react") => rec.react_line(body),
+        Some("frame") => rec.frames_line(body),
+        Some("mark") => rec.marks_line(body),
+        Some("run") => rec.start_run(c.label.as_deref().unwrap_or("run"), c.incident.as_deref().unwrap_or("")),
+        _ => rec.frontend_line(body),
+    }
+}
+
 fn current_path() -> PathBuf {
     debug_root().join("current.json")
 }
@@ -428,7 +505,11 @@ fn tombstone_pid(pid: u32) {
 
 impl Drop for DebugRecorder {
     fn drop(&mut self) {
-        tombstone_pid(std::process::id());
+        // A private recorder shares the pid of a live debug window in this process:
+        // it must not tombstone a record it never wrote.
+        if self.publish {
+            tombstone_pid(std::process::id());
+        }
     }
 }
 
@@ -685,5 +766,111 @@ mod tests {
     fn cdp_socket_addr_parses_the_published_url() {
         assert_eq!(super::cdp_socket_addr("http://127.0.0.1:9222").map(|a| a.port()), Some(9222));
         assert!(super::cdp_socket_addr("").is_none());
+    }
+
+    // ---- route_line / start_private: only ever under a temp dir, never the real debug root ----
+
+    const STREAMS: [&str; 6] = ["frontend.jsonl", "dom.jsonl", "net.jsonl", "react.jsonl", "frames.jsonl", "marks.jsonl"];
+
+    /// A private recorder over a fresh temp dir. The caller removes `root`.
+    fn private_recorder(tag: &str) -> (super::DebugRecorder, std::path::PathBuf) {
+        let root = std::env::temp_dir().join(format!("mini-debug-{tag}-{}-{}", std::process::id(), super::now_ms()));
+        let rec = super::DebugRecorder::start_private(root.join("session")).expect("private recorder starts");
+        (rec, root)
+    }
+
+    fn stream(dir: &std::path::Path, file: &str) -> Vec<String> {
+        std::fs::read_to_string(dir.join(file)).unwrap_or_default().lines().map(str::to_string).collect()
+    }
+
+    fn dir_name(dir: &std::path::Path) -> String {
+        dir.file_name().unwrap().to_string_lossy().into_owned()
+    }
+
+    #[test]
+    fn route_line_splits_a_batch_into_its_streams() {
+        let (mut rec, root) = private_recorder("batch");
+        let net = r#"{"cmd":"debug","kind":"net","t":1}"#;
+        let dom = r#"{"cmd":"debug","kind":"dom","t":2}"#;
+        let batch = serde_json::json!({ "cmd": "debug-batch", "lines": [net, dom] }).to_string();
+        super::route_line(&mut rec, &batch);
+        let run = rec.run_dir();
+        assert_eq!(stream(&run, "net.jsonl"), [net]);
+        assert_eq!(stream(&run, "dom.jsonl"), [dom]);
+        for other in ["frontend.jsonl", "react.jsonl", "frames.jsonl", "marks.jsonl"] {
+            assert!(stream(&run, other).is_empty(), "{other} should stay empty");
+        }
+        assert!(!root.join("current.json").exists(), "a private recorder publishes nothing");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn route_line_files_each_kind_in_its_own_stream() {
+        let (mut rec, root) = private_recorder("kinds");
+        let cases = [
+            ("dom", "dom.jsonl"),
+            ("net", "net.jsonl"),
+            ("react", "react.jsonl"),
+            ("frame", "frames.jsonl"),
+            ("mark", "marks.jsonl"),
+            ("console", "frontend.jsonl"),
+        ];
+        for (kind, _) in cases {
+            super::route_line(&mut rec, &format!(r#"{{"cmd":"debug","kind":"{kind}"}}"#));
+        }
+        super::route_line(&mut rec, r#"{"cmd":"debug"}"#); // no kind: frontend as well
+        let run = rec.run_dir();
+        for (kind, file) in cases {
+            let want = format!(r#"{{"cmd":"debug","kind":"{kind}"}}"#);
+            assert!(stream(&run, file).contains(&want), "{kind} belongs in {file}");
+        }
+        for file in ["dom.jsonl", "net.jsonl", "react.jsonl", "frames.jsonl", "marks.jsonl"] {
+            assert_eq!(stream(&run, file).len(), 1, "{file}");
+        }
+        assert_eq!(stream(&run, "frontend.jsonl").len(), 2, "console + the kind-less line");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn route_line_ignores_other_commands_and_garbage() {
+        let (mut rec, root) = private_recorder("ignored");
+        for line in [r#"{"cmd":"navigate","text":"https://example.com"}"#, r#"{"cmd":"focus-url"}"#, r#"{"kind":"net"}"#, "not json", ""] {
+            super::route_line(&mut rec, line);
+        }
+        // A batch only carries `debug` lines: no other command, no nested batch.
+        let nested = r#"{"cmd":"debug-batch","lines":["{\"cmd\":\"debug\",\"kind\":\"net\"}"]}"#;
+        let batch = serde_json::json!({ "cmd": "debug-batch", "lines": [r#"{"cmd":"navigate"}"#, "junk", nested] }).to_string();
+        super::route_line(&mut rec, &batch);
+        let run = rec.run_dir();
+        for file in STREAMS {
+            assert!(stream(&run, file).is_empty(), "{file} should stay empty");
+        }
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn a_run_line_rotates_to_a_new_run_with_its_label_and_incident() {
+        let (mut rec, root) = private_recorder("run");
+        super::route_line(&mut rec, r#"{"cmd":"debug","kind":"run","label":"phone view","incident":"INC-7"}"#);
+        let run = rec.run_dir();
+        assert_eq!(dir_name(&run), "run-001-phone_view");
+        let meta: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(run.join("run.json")).unwrap()).unwrap();
+        assert_eq!(meta["label"], "phone view");
+        assert_eq!(meta["incident"], "INC-7");
+        super::route_line(&mut rec, r#"{"cmd":"debug","kind":"run"}"#); // no label: "run"
+        assert_eq!(dir_name(&rec.run_dir()), "run-002-run");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn a_private_recorder_opens_run_000_and_never_publishes_current_json() {
+        let (mut rec, root) = private_recorder("private");
+        assert_eq!(dir_name(&rec.run_dir()), "run-000-device");
+        rec.start_run("second", "");
+        rec.mark_ready();
+        assert!(rec.status_path().is_none(), "a private recorder has nowhere to publish");
+        assert!(!root.join("current.json").exists());
+        assert!(!root.join("session").join("current.json").exists());
+        let _ = std::fs::remove_dir_all(&root);
     }
 }

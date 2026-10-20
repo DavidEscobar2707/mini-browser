@@ -36,13 +36,6 @@ document.addEventListener('keydown', (e) => {
 }, true);
 "#;
 
-/// Debug mode only. Canonical source: tools/recorder.js (also injected into
-/// external Chromiums by tools/record.js). Its `post` prefers the __miniPost
-/// CDP binding and falls back to window.ipc — inside Mini only window.ipc
-/// exists, so everything ships as {"cmd":"debug","kind":...} lines.
-const DEBUG_RECORDER_SCRIPT: &str = include_str!("../tools/recorder.js");
-
-
 enum Msg {
     ChromeIpc(String),
     ContentIpc(String),
@@ -232,38 +225,6 @@ struct IpcCmd {
     cmd: String,
     #[serde(default)]
     text: Option<String>,
-    #[serde(default)]
-    kind: Option<String>,
-    #[serde(default)]
-    label: Option<String>,
-    #[serde(default)]
-    incident: Option<String>,
-    /// `debug-batch`: raw recorder lines, each a `{"cmd":"debug",...}` object.
-    #[serde(default)]
-    lines: Vec<String>,
-}
-
-/// Files one recorder line (or every line of a `debug-batch`) into its stream.
-fn route_debug(rec: &mut debug::DebugRecorder, c: &IpcCmd, body: &str) {
-    if c.cmd == "debug-batch" {
-        for line in &c.lines {
-            if let Ok(inner) = serde_json::from_str::<IpcCmd>(line) {
-                if inner.cmd == "debug" {
-                    route_debug(rec, &inner, line);
-                }
-            }
-        }
-        return;
-    }
-    match c.kind.as_deref() {
-        Some("dom") => rec.dom_line(body),
-        Some("net") => rec.net_line(body),
-        Some("react") => rec.react_line(body),
-        Some("frame") => rec.frames_line(body),
-        Some("mark") => rec.marks_line(body),
-        Some("run") => rec.start_run(c.label.as_deref().unwrap_or("run"), c.incident.as_deref().unwrap_or("")),
-        _ => rec.frontend_line(body),
-    }
 }
 
 fn handle_msg(app: &mut App, msg: Msg, control_flow: &mut ControlFlow) {
@@ -304,7 +265,7 @@ fn handle_msg(app: &mut App, msg: Msg, control_flow: &mut ControlFlow) {
                     }
                     "debug" | "debug-batch" => {
                         if let Some(rec) = app.debug.as_mut() {
-                            route_debug(rec, &c, &body);
+                            debug::route_line(rec, &body);
                         }
                     }
                     _ => {} // everything else from content: ignored
@@ -505,7 +466,7 @@ fn main() {
         content_builder = content_builder.with_extensions_path(dir);
     }
     if debug_on {
-        content_builder = content_builder.with_initialization_script(DEBUG_RECORDER_SCRIPT);
+        content_builder = content_builder.with_initialization_script(debug::RECORDER_SCRIPT);
     }
     if adblock::enabled() {
         content_builder = content_builder.with_initialization_script(adblock::YOUTUBE_AD_SKIP_SCRIPT);
@@ -738,7 +699,7 @@ fn build_qa_shell(title: &str, host: String, devtools: bool) -> (QaShell, std::s
         .with_browser_extensions_enabled(false)
         .with_browser_accelerator_keys(false);
     if debug::enabled() {
-        content_builder = content_builder.with_initialization_script(DEBUG_RECORDER_SCRIPT);
+        content_builder = content_builder.with_initialization_script(debug::RECORDER_SCRIPT);
     }
     // The QA API the loop drives the page through (`__miniQA.*`).
     for script in qa::PAGE_SCRIPTS {
@@ -774,13 +735,10 @@ fn run_qa_event_loop(shell: QaShell, state: qa::bridge::BridgeState, abort: Opti
             }
             Event::UserEvent(QaEvent::ContentIpc(body)) => {
                 if let Some(rec) = debug_rec.as_mut() {
-                    if let Ok(c) = serde_json::from_str::<IpcCmd>(&body) {
-                        // Content-IPC allowlist unchanged: only `debug` (recorder)
-                        // messages are meaningful here (see module doc comment above).
-                        if c.cmd == "debug" || c.cmd == "debug-batch" {
-                            route_debug(rec, &c, &body);
-                        }
-                    }
+                    // Content-IPC allowlist unchanged: only `debug` (recorder)
+                    // messages are meaningful here (see module doc comment above);
+                    // `route_line` drops every other command.
+                    debug::route_line(rec, &body);
                 }
             }
             Event::WindowEvent { event: WindowEvent::CloseRequested, .. } => {
