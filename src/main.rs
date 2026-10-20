@@ -13,6 +13,7 @@ mod learn;
 mod text_helper;
 mod desk;
 mod adblock;
+mod android;
 
 use crate::qa::Browser;
 
