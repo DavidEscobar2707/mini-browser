@@ -872,3 +872,37 @@ mod tests {
         let _ = std::fs::remove_dir_all(&root);
     }
 }
+
+#[cfg(test)]
+mod recorder_script_tests {
+    use super::RECORDER_SCRIPT;
+
+    /// A syntax error in the injected recorder is silent: the browser drops the
+    /// script and every stream stays empty. Parse it the way a browser would.
+    #[test]
+    fn recorder_script_is_valid_javascript() {
+        let path = std::env::temp_dir().join(format!("mini-recorder-check-{}.js", std::process::id()));
+        std::fs::write(&path, RECORDER_SCRIPT).expect("write temp script");
+        let out = match std::process::Command::new("node").arg("--check").arg(&path).output() {
+            Ok(out) => out,
+            Err(e) => {
+                let _ = std::fs::remove_file(&path);
+                eprintln!("recorder_script_is_valid_javascript: node not available ({e}); parse check skipped");
+                return;
+            }
+        };
+        let _ = std::fs::remove_file(&path);
+        assert!(
+            out.status.success(),
+            "tools/recorder.js does not parse:\n{}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+    }
+
+    /// Backstop for the exact regression (duplicate `const flush` in one scope)
+    /// on machines without node.
+    #[test]
+    fn recorder_script_declares_flush_once() {
+        assert_eq!(RECORDER_SCRIPT.matches("const flush = ").count(), 1);
+    }
+}

@@ -94,7 +94,7 @@
 
   const buf = [];
   const frameTs = [];
-  const flush = () => {
+  const flushDom = () => {
     rectBudget = 0;
     if (buf.length) {
       post({ cmd: 'debug', kind: 'dom', t: T(), url: location.href,
@@ -129,7 +129,7 @@
       subtree: true, childList: true, characterData: true,
       attributes: true, attributeOldValue: true,
     });
-    setInterval(flush, 250);
+    setInterval(flushDom, 250);
   };
   document.documentElement ? start() : document.addEventListener('DOMContentLoaded', start);
   const onFrame = () => { frameTs.push(T()); requestAnimationFrame(onFrame); };
