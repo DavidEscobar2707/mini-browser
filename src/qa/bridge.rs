@@ -312,7 +312,6 @@ impl Browser for UiBridge {
         match self.cdp("Emulation.setDeviceMetricsOverride", params) {
             Ok(_) => {
                 *self.viewport_mechanism.lock() = "cdp";
-                Ok(())
             }
             Err(e) => {
                 eprintln!(
@@ -322,14 +321,30 @@ impl Browser for UiBridge {
                 match self.send(QaOp::SetViewportFallback(v)) {
                     Ok(_) => {
                         *self.viewport_mechanism.lock() = "bounds-fallback";
-                        Ok(())
                     }
                     Err(e2) => {
-                        Err(format!("set_viewport: cdp failed ({e}); bounds fallback failed ({e2})"))
+                        return Err(format!("set_viewport: cdp failed ({e}); bounds fallback failed ({e2})"));
                     }
                 }
             }
         }
+        // Touch + UA follow the viewport: a phone page must see coarse pointers,
+        // touch events and a mobile UA, and the desktop pass must see none of them.
+        let touch = self.cdp(
+            "Emulation.setTouchEmulationEnabled",
+            json!({ "enabled": v.mobile, "maxTouchPoints": if v.mobile { 5 } else { 1 } }),
+        );
+        if let Err(e) = touch {
+            eprintln!("qa: Emulation.setTouchEmulationEnabled failed ({e}); taps still dispatch as touch events");
+        }
+        let major = self
+            .browser_version()
+            .and_then(|s| s.split('.').next().map(str::to_string))
+            .unwrap_or_else(|| "130".to_string());
+        if let Err(e) = self.cdp("Emulation.setUserAgentOverride", user_agent_for(&v, &major)) {
+            eprintln!("qa: Emulation.setUserAgentOverride failed ({e}); the page keeps its current user agent");
+        }
+        Ok(())
     }
 
     fn screenshot(&self, path: &Path) -> Result<(), String> {
@@ -374,6 +389,12 @@ impl Browser for UiBridge {
         let mut release = base;
         release["type"] = json!("mouseReleased");
         self.cdp("Input.dispatchMouseEvent", release)?;
+        Ok(())
+    }
+
+    fn tap(&self, x: f64, y: f64) -> Result<(), String> {
+        self.cdp("Input.dispatchTouchEvent", json!({ "type": "touchStart", "touchPoints": [{ "x": x, "y": y }] }))?;
+        self.cdp("Input.dispatchTouchEvent", json!({ "type": "touchEnd", "touchPoints": [] }))?;
         Ok(())
     }
 
@@ -700,4 +721,71 @@ fn handle_web_resource_requested(
         url,
         mechanism: "web-resource-requested".to_string(),
     });
+}
+
+/// `Emulation.setUserAgentOverride` params for a viewport. Mobile viewports get an
+/// Android Chrome UA with matching client hints. Desktop clears the override: an empty
+/// `userAgent` without `userAgentMetadata` hands the webview its own UA and client hints
+/// back, which re-sending the old UA string does not (that leaves `userAgentData.brands`
+/// empty). Clearing when nothing was overridden is a no-op.
+pub fn user_agent_for(v: &Viewport, chrome_major: &str) -> Value {
+    if !v.mobile {
+        return json!({ "userAgent": "" });
+    }
+    let (model, kind) = if v.name == "tablet" { ("Pixel Tablet", "") } else { ("Pixel 8", "Mobile ") };
+    json!({
+        "userAgent": format!(
+            "Mozilla/5.0 (Linux; Android 14; {model}) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/{chrome_major}.0.0.0 {kind}Safari/537.36"
+        ),
+        "platform": "Linux armv8l",
+        "userAgentMetadata": {
+            "brands": [
+                { "brand": "Chromium", "version": chrome_major },
+                { "brand": "Not=A?Brand", "version": "24" }
+            ],
+            "fullVersion": format!("{chrome_major}.0.0.0"),
+            "platform": "Android",
+            "platformVersion": "14.0.0",
+            "architecture": "",
+            "model": model,
+            "mobile": v.name != "tablet",
+            "bitness": "",
+            "wow64": false
+        }
+    })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::qa::VIEWPORTS;
+
+    /// A QA viewport by name: `VIEWPORTS` is in run order, never index it.
+    fn viewport(name: &str) -> Viewport {
+        *VIEWPORTS.iter().find(|v| v.name == name).expect("known QA viewport")
+    }
+
+    #[test]
+    fn phone_ua_is_android_mobile() {
+        let p = user_agent_for(&viewport("phone"), "141");
+        assert!(p["userAgent"].as_str().unwrap().contains("Android 14; Pixel 8"));
+        assert!(p["userAgent"].as_str().unwrap().contains("Chrome/141.0.0.0 Mobile Safari"));
+        assert_eq!(p["userAgentMetadata"]["mobile"], true);
+    }
+
+    #[test]
+    fn tablet_ua_is_android_without_the_mobile_token() {
+        let t = user_agent_for(&viewport("tablet"), "141");
+        let ua = t["userAgent"].as_str().unwrap();
+        assert!(ua.contains("Android 14; Pixel Tablet"), "{ua}");
+        assert!(!ua.contains("Mobile"), "{ua}");
+        assert_eq!(t["userAgentMetadata"]["mobile"], false);
+    }
+
+    #[test]
+    fn desktop_clears_the_override_instead_of_resending_a_ua_string() {
+        // An empty userAgent without metadata resets the webview to its own UA and client
+        // hints. Re-sending the old UA string would leave navigator.userAgentData empty.
+        assert_eq!(user_agent_for(&viewport("desktop"), "141"), json!({ "userAgent": "" }));
+    }
 }

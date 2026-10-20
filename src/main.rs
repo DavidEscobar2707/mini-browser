@@ -995,7 +995,7 @@ fn run_qa(args: &[String], qa_index: usize) -> ! {
     run_qa_event_loop(shell, state, Some(abort_cfg));
 }
 
-/// `mini --qa-spike <url>`: diagnostic that exercises the five bridge
+/// `mini --qa-spike <url>`: diagnostic that exercises the six bridge
 /// capabilities directly (no Jev, no agent loop) and prints one JSON line
 /// per capability plus a summary. Exits 0 only if every capability passed.
 fn run_qa_spike(url: Option<String>) -> ! {
@@ -1047,10 +1047,10 @@ fn read_counter(bridge: &qa::bridge::UiBridge) -> Option<i64> {
         .ok()
 }
 
-/// Evaluates the element's bounding rect as a plain-object literal (never a
-/// live `DOMRect` — those serialize to `{}`, their fields are prototype
-/// getters) and dispatches a real CDP click at its center.
-fn click_element(bridge: &qa::bridge::UiBridge, id: &str) -> Option<bool> {
+/// Center of the element's bounding rect. The rect is evaluated as a
+/// plain-object literal (never a live `DOMRect` — those serialize to `{}`,
+/// their fields are prototype getters).
+fn element_center(bridge: &qa::bridge::UiBridge, id: &str) -> Option<(f64, f64)> {
     let js = format!(
         "(() => {{ const el = document.getElementById('{id}'); if (!el) return null; \
          const r = el.getBoundingClientRect(); return {{x:r.x,y:r.y,w:r.width,h:r.height}}; }})()"
@@ -1059,7 +1059,19 @@ fn click_element(bridge: &qa::bridge::UiBridge, id: &str) -> Option<bool> {
     let rect: serde_json::Value = serde_json::from_str(&raw).ok()?;
     let x = rect.get("x")?.as_f64()? + rect.get("w")?.as_f64()? / 2.0;
     let y = rect.get("y")?.as_f64()? + rect.get("h")?.as_f64()? / 2.0;
+    Some((x, y))
+}
+
+/// Dispatches a real CDP mouse click at the element's center.
+fn click_element(bridge: &qa::bridge::UiBridge, id: &str) -> Option<bool> {
+    let (x, y) = element_center(bridge, id)?;
     Some(bridge.mouse_click(x, y).is_ok())
+}
+
+/// Dispatches a real CDP touch tap at the element's center.
+fn tap_element(bridge: &qa::bridge::UiBridge, id: &str) -> Option<bool> {
+    let (x, y) = element_center(bridge, id)?;
+    Some(bridge.tap(x, y).is_ok())
 }
 
 /// A QA viewport by name: `qa::VIEWPORTS` is in run order (phone first), so the
@@ -1161,6 +1173,57 @@ fn spike_checks(bridge: &qa::bridge::UiBridge, url: &str, policy: qa::firewall::
         "detail": format!(
             "posted={post_clicked} blocked {blocked_before} -> {} err-span={err_text:?}",
             blocked_after.len()
+        ),
+    }));
+
+    // 6. touch: the phone viewport turns on touch emulation and the Android UA, and a
+    // tap is a real touch gesture (touchstart fires) that still ends in a click. Last
+    // on purpose: it taps #inc, and the click check above needs the counter at 0.
+    let touch_vp = bridge.set_viewport(phone);
+    let touch_raw = bridge.eval(
+        "[navigator.maxTouchPoints, matchMedia('(pointer: coarse)').matches, /Android/.test(navigator.userAgent)]",
+    );
+    let touch_value = touch_raw
+        .as_deref()
+        .ok()
+        .and_then(|raw| serde_json::from_str::<serde_json::Value>(raw).ok())
+        .unwrap_or(serde_json::Value::Null);
+    let truthy = |v: Option<&serde_json::Value>| match v {
+        Some(serde_json::Value::Bool(b)) => *b,
+        Some(serde_json::Value::Number(n)) => n.as_f64().is_some_and(|n| n != 0.0),
+        _ => false,
+    };
+    let emulated = touch_vp.is_ok() && (0..3).all(|i| truthy(touch_value.get(i)));
+    let _ = bridge.eval(
+        "(() => { window.__touchStarts = 0; \
+         document.addEventListener('touchstart', () => { window.__touchStarts += 1; }, true); return true; })()",
+    );
+    let tap_before = read_counter(bridge);
+    let tapped = tap_element(bridge, "inc").unwrap_or(false);
+    std::thread::sleep(std::time::Duration::from_millis(200));
+    let tap_after = read_counter(bridge);
+    let touch_starts = bridge.eval("window.__touchStarts");
+    let tap_ok = tapped
+        && tap_before.is_some()
+        && tap_after == tap_before.map(|n| n + 1)
+        && touch_starts.as_deref().map(str::trim) == Ok("1");
+    // Back at desktop, touch and the Android UA are gone and the engine's own client
+    // hints are back (an override that merely re-sent the old UA string left brands []).
+    let restore_vp = bridge.set_viewport(viewport_named("desktop"));
+    let restored_raw = bridge.eval(
+        "[matchMedia('(pointer: coarse)').matches, /Android/.test(navigator.userAgent), !!(navigator.userAgentData && navigator.userAgentData.brands.length)]",
+    );
+    let restored_value = restored_raw
+        .as_deref()
+        .ok()
+        .and_then(|raw| serde_json::from_str::<serde_json::Value>(raw).ok())
+        .unwrap_or(serde_json::Value::Null);
+    let restored = restore_vp.is_ok() && restored_value == serde_json::json!([false, false, true]);
+    record(serde_json::json!({
+        "cap": "touch", "ok": emulated && tap_ok && restored, "value": touch_value,
+        "restored": restored_value,
+        "detail": format!(
+            "set_viewport(phone)={touch_vp:?} tapped={tapped} touchstarts={touch_starts:?} counter {tap_before:?} -> {tap_after:?}; desktop restore={restore_vp:?}"
         ),
     }));
 

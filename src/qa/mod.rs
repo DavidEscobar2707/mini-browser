@@ -125,6 +125,11 @@ pub trait Browser: Send + Sync {
     fn screenshot(&self, path: &Path) -> Result<(), String>;
     /// Real input events at CSS-pixel coordinates of the content webview.
     fn mouse_click(&self, x: f64, y: f64) -> Result<(), String>;
+    /// One-finger tap at CSS-pixel coordinates. Transports without touch input
+    /// fall back to a mouse click.
+    fn tap(&self, x: f64, y: f64) -> Result<(), String> {
+        self.mouse_click(x, y)
+    }
     /// Insert text into the focused element (real input, fires input events).
     fn key_text(&self, text: &str) -> Result<(), String>;
     /// Rotate the JSONL recorder (see `debug.rs`); returns the new run dir.
@@ -410,7 +415,8 @@ pub struct StepRecord {
 #[derive(Clone, Debug, Default, Serialize)]
 pub struct ViewportFacts {
     pub viewport: String,
-    /// Jev was allowed to drive controls here (see `QaConfig::explore`).
+    /// Jev drove controls here: the viewport is in `QaConfig::explore` and exploration
+    /// actually ran (it is skipped on a login/checkout/account page).
     pub explored: bool,
     pub run_dir: Option<String>,
     pub nav_failed: Option<String>,

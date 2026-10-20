@@ -110,6 +110,8 @@ pub fn execute(cfg: &QaConfig, browser: &dyn Browser, judge: &dyn Judge) -> QaRe
         judge_ok: 0,
         judge_err: 0,
         third_party: 0,
+        vp_name: String::new(),
+        vp_mobile: false,
     };
 
     for dir in ["", "shots", "runs"] {
@@ -148,6 +150,8 @@ pub fn execute(cfg: &QaConfig, browser: &dyn Browser, judge: &dyn Judge) -> QaRe
 
     for (i, vp) in VIEWPORTS.iter().enumerate() {
         let mut facts = ViewportFacts { viewport: vp.name.to_string(), ..Default::default() };
+        pass.vp_name = vp.name.to_string();
+        pass.vp_mobile = vp.mobile;
         // Step attribution is per viewport: exploration only runs at the viewports
         // in cfg.explore, and a tablet fact must never inherit a phone step number.
         pass.step_marks.clear();
@@ -171,18 +175,21 @@ pub fn execute(cfg: &QaConfig, browser: &dyn Browser, judge: &dyn Judge) -> QaRe
             }
         };
 
-        // 2. Viewport override. The first pass also performs the real navigation.
+        // 2. Viewport override, then a fresh load of the start URL. Every viewport
+        // begins from the page as the server hands it out, so one viewport's clicks
+        // never decide what the next one sees, and the page meets this viewport's
+        // touch mode and user agent at load.
         let run_rel = run_dir.as_ref().map(|d| rel_run_dir(&cfg.out_dir, d));
         facts.run_dir = run_rel.clone();
         if let Err(e) = browser.set_viewport(*vp) {
             pass.note(format!("{}: viewport override failed: {e}", vp.name));
         }
-        if i == 0 {
-            if let Err(e) = navigate(pass.browser, cfg) {
+        if let Err(e) = navigate(pass.browser, cfg) {
+            facts.nav_failed = Some(e.clone());
+            viewports.push(facts);
+            if i == 0 {
                 // Nothing loaded: every viewport is inconclusive, and probing
                 // Chromium's error page would only invent findings.
-                facts.nav_failed = Some(e.clone());
-                viewports.push(facts);
                 for rest in VIEWPORTS.iter().skip(1) {
                     viewports.push(ViewportFacts {
                         viewport: rest.name.to_string(),
@@ -192,15 +199,20 @@ pub fn execute(cfg: &QaConfig, browser: &dyn Browser, judge: &dyn Judge) -> QaRe
                 }
                 break;
             }
+            // A later viewport that cannot load is inconclusive on its own.
+            continue;
         }
         let settle = settle_pass(pass.browser);
         if !settle.settled {
             pass.note(format!("{}: page never fully settled ({} ms)", vp.name, settle.ms));
         }
 
-        // 3. Section under test: ask once, reuse while it still resolves.
-        if i == 0 {
-            if let Some(section) = &cfg.section {
+        // 3. Section under test. The region registry lives in the page and every
+        // viewport loads a fresh page, so a section that resolved at the first
+        // viewport is looked up again here. A section the first viewport could not
+        // find is not asked for again: the later viewports judge the whole page.
+        if let Some(section) = &cfg.section {
+            if i == 0 || section_resolved {
                 match pass.find_root(section) {
                     Some((id, label, note)) => {
                         root = Some(id);
@@ -210,23 +222,14 @@ pub fn execute(cfg: &QaConfig, browser: &dyn Browser, judge: &dyn Judge) -> QaRe
                         }
                         goal_label = label;
                     }
-                    None => pass.note(format!(
-                        "{}: no confident region for section \"{section}\"; judging the whole page",
-                        vp.name
-                    )),
-                }
-            }
-        } else if section_resolved {
-            // The registry is page-side and survives layout changes; when it
-            // stops resolving, judge the whole page instead of failing the pass.
-            if let Some(id) = root.clone() {
-                if let Err(e) = pass.snapshot(Some(&id)) {
-                    root = None;
-                    section_resolved = false;
-                    pass.note(format!(
-                        "{}: the section region stopped resolving ({e}); judging the whole page",
-                        vp.name
-                    ));
+                    None => {
+                        root = None;
+                        section_resolved = false;
+                        pass.note(format!(
+                            "{}: no confident region for section \"{section}\"; judging the whole page",
+                            vp.name
+                        ));
+                    }
                 }
             }
         }
@@ -258,7 +261,6 @@ pub fn execute(cfg: &QaConfig, browser: &dyn Browser, judge: &dyn Judge) -> QaRe
         // 6. Exploration: the viewports listed in cfg.explore, and never on a page
         // that exists to log in, check out or delete something.
         if cfg.explores(vp.name) {
-            facts.explored = true;
             if firewall::is_forbidden_page(&observation.url) {
                 pass.note(format!(
                     "exploration skipped: {} is a login/checkout/account page",
@@ -266,6 +268,7 @@ pub fn execute(cfg: &QaConfig, browser: &dyn Browser, judge: &dyn Judge) -> QaRe
                 ));
                 facts.findings.push(forbidden_page_fact(vp, &observation.url));
             } else {
+                facts.explored = true;
                 let exploration = pass.explore(&goal_label, root.as_deref(), &observation);
                 facts.steps = exploration.steps;
                 if let Some(url) = exploration.forbidden {
@@ -386,6 +389,10 @@ struct Pass<'a> {
     judge_ok: usize,
     judge_err: usize,
     third_party: u32,
+    /// Name of the viewport being run (prefixes the step screenshots).
+    vp_name: String,
+    /// The viewport being run is a touch device: controls are tapped, not clicked.
+    vp_mobile: bool,
 }
 
 #[derive(Clone)]
@@ -581,7 +588,10 @@ impl<'a> Pass<'a> {
         let mut refusals: Vec<String> = Vec::new();
         let mut stop = None;
         let mut forbidden: Option<String> = None;
-        let goal = format!("Exercise the controls in {goal} and report anything that misbehaves.");
+        let goal = format!(
+            "Exercise the controls in {goal} as seen on a {} viewport and report anything that misbehaves.",
+            self.vp_name
+        );
 
         while history.len() < self.cfg.steps() {
             if self.out_of_time() {
@@ -766,7 +776,7 @@ impl<'a> Pass<'a> {
                 }
             }
 
-            let _ = self.shot(&format!("step-{step:02}.jpg"));
+            let _ = self.shot(&format!("{}-step-{step:02}.jpg", self.vp_name));
             record.ms = now_ms().saturating_sub(step_started);
             self.step_marks.push((step_started, step));
             history.push(record);
@@ -853,7 +863,11 @@ impl<'a> Pass<'a> {
                         hit.reason.clone().unwrap_or_else(|| "covered".to_string())
                     ));
                 }
-                self.browser.mouse_click(hit.x, hit.y)
+                if self.vp_mobile {
+                    self.browser.tap(hit.x, hit.y)
+                } else {
+                    self.browser.mouse_click(hit.x, hit.y)
+                }
             }
             "TYPE_TEXT" => {
                 let id = target.ok_or("TYPE_TEXT without a target")?;
@@ -1637,6 +1651,8 @@ mod tests {
         /// Answer the first `*_target` head with a malformed distribution.
         bad_target_once: Mutex<bool>,
         calls: Mutex<u32>,
+        /// The `goal` each exploration `operation` question carried, in order.
+        goals: Mutex<Vec<String>>,
     }
 
     fn choice(pick: &str, criteria: &Value, confidence: f64) -> Value {
@@ -1668,6 +1684,7 @@ mod tests {
                 fail: false,
                 bad_target_once: Mutex::new(false),
                 calls: Mutex::new(0),
+                goals: Mutex::new(Vec::new()),
             }
         }
     }
@@ -1682,6 +1699,9 @@ mod tests {
             let mut out = serde_json::Map::new();
             for key in questions.keys() {
                 let value = if key == "operation" {
+                    if let Some(goal) = questions[key]["instructions"]["goal"].as_str() {
+                        self.goals.lock().push(goal.to_string());
+                    }
                     let next = {
                         let mut ops = self.operations.lock();
                         if ops.is_empty() { "DONE".to_string() } else { ops.remove(0) }
@@ -1725,6 +1745,7 @@ mod tests {
         blocked: Vec<firewall::Blocked>,
         js: Mutex<Vec<String>>,
         clicks: Mutex<Vec<(f64, f64)>>,
+        taps: Mutex<Vec<(f64, f64)>>,
         keys: Mutex<Vec<String>>,
         labels: Mutex<Vec<String>>,
         viewports: Mutex<Vec<String>>,
@@ -1741,6 +1762,14 @@ mod tests {
         snapshot_after: Option<String>,
         snapshots: std::sync::atomic::AtomicUsize,
         cdp_calls: Mutex<Vec<String>>,
+        /// Fail the Nth `Page.navigate` (1-based) with a connection error.
+        navigate_fail_at: Option<usize>,
+        navigations: std::sync::atomic::AtomicUsize,
+        /// Models the page-side section registry (`QA.__sections`): `Page.navigate`
+        /// empties it, `__miniQA.sections()` fills it, and a snapshot or probe scoped
+        /// to a root id fails while it is empty.
+        strict_roots: bool,
+        registry_filled: std::sync::atomic::AtomicBool,
         root: PathBuf,
     }
 
@@ -1753,6 +1782,7 @@ mod tests {
                 blocked: Vec::new(),
                 js: Mutex::new(Vec::new()),
                 clicks: Mutex::new(Vec::new()),
+                taps: Mutex::new(Vec::new()),
                 keys: Mutex::new(Vec::new()),
                 labels: Mutex::new(Vec::new()),
                 viewports: Mutex::new(Vec::new()),
@@ -1764,8 +1794,17 @@ mod tests {
                 snapshot_after: None,
                 snapshots: std::sync::atomic::AtomicUsize::new(0),
                 cdp_calls: Mutex::new(Vec::new()),
+                navigate_fail_at: None,
+                navigations: std::sync::atomic::AtomicUsize::new(0),
+                strict_roots: false,
+                registry_filled: std::sync::atomic::AtomicBool::new(false),
                 root,
             }
+        }
+
+        /// Pointer inputs dispatched so far: mouse clicks and touch taps together.
+        fn pointer_inputs(&self) -> usize {
+            self.clicks.lock().len() + self.taps.lock().len()
         }
 
         fn route(self, fragment: &str, payload: &str) -> Self {
@@ -1774,6 +1813,15 @@ mod tests {
         }
 
         fn payload(&self, js: &str) -> String {
+            if js.contains("__miniQA.sections") {
+                self.registry_filled.store(true, std::sync::atomic::Ordering::SeqCst);
+            }
+            if self.strict_roots
+                && !self.registry_filled.load(std::sync::atomic::Ordering::SeqCst)
+                && (js.contains(r#"__miniQA.snapshot("s1")"#) || js.contains(r#"__miniQA.probe("s1")"#))
+            {
+                return r#"{"ok":false,"error":"unknown root id: s1"}"#.to_string();
+            }
             for (fragment, payload) in self.routes.lock().iter() {
                 if js.contains(fragment.as_str()) {
                     return payload.clone();
@@ -1814,6 +1862,13 @@ mod tests {
         }
         fn cdp(&self, method: &str, _params: Value) -> Result<Value, String> {
             self.cdp_calls.lock().push(method.to_string());
+            if method == "Page.navigate" {
+                self.registry_filled.store(false, std::sync::atomic::Ordering::SeqCst);
+                let nth = self.navigations.fetch_add(1, std::sync::atomic::Ordering::SeqCst) + 1;
+                if self.navigate_fail_at == Some(nth) {
+                    return Err("net::ERR_CONNECTION_REFUSED".to_string());
+                }
+            }
             Ok(Value::Null)
         }
         fn set_viewport(&self, v: Viewport) -> Result<(), String> {
@@ -1828,6 +1883,10 @@ mod tests {
         }
         fn mouse_click(&self, x: f64, y: f64) -> Result<(), String> {
             self.clicks.lock().push((x, y));
+            Ok(())
+        }
+        fn tap(&self, x: f64, y: f64) -> Result<(), String> {
+            self.taps.lock().push((x, y));
             Ok(())
         }
         fn key_text(&self, text: &str) -> Result<(), String> {
@@ -1949,7 +2008,90 @@ mod tests {
         cfg.explore.clear();
         let report = execute(&cfg, &browser, &judge);
         assert!(report.viewports.iter().all(|v| !v.explored && v.steps.is_empty()));
-        assert!(browser.clicks.lock().is_empty());
+        assert_eq!(browser.pointer_inputs(), 0);
+    }
+
+    #[test]
+    fn mobile_viewports_tap_and_desktop_clicks() {
+        let browser = FakeBrowser::new("tap-vs-click");
+        let mut judge = ScriptedJudge::with(&["CLICK", "DONE", "CLICK", "DONE"]);
+        judge.mutate_p = 0.02;
+        let _ = executed(&browser, &judge);
+        assert_eq!(browser.taps.lock().len(), 1, "phone step is a touch tap");
+        assert_eq!(browser.clicks.lock().len(), 1, "desktop step is a mouse click");
+    }
+
+    #[test]
+    fn step_screenshots_carry_the_viewport_name() {
+        let browser = FakeBrowser::new("step-shots");
+        let judge = ScriptedJudge::with(&["CLICK", "DONE", "CLICK", "DONE"]);
+        let report = executed(&browser, &judge);
+        assert!(report.out_dir.join("shots/phone-step-01.jpg").exists());
+        assert!(report.out_dir.join("shots/desktop-step-01.jpg").exists());
+    }
+
+    #[test]
+    fn the_explore_goal_names_the_viewport_it_runs_at() {
+        let browser = FakeBrowser::new("goal");
+        let judge = ScriptedJudge::with(&["DONE", "DONE"]);
+        let _ = executed(&browser, &judge);
+        let goals = judge.goals.lock().clone();
+        assert_eq!(goals.len(), 2, "{goals:?}");
+        assert!(goals[0].contains("as seen on a phone viewport"), "{}", goals[0]);
+        assert!(goals[1].contains("as seen on a desktop viewport"), "{}", goals[1]);
+    }
+
+    #[test]
+    fn every_viewport_starts_from_a_fresh_navigation() {
+        let browser = FakeBrowser::new("fresh-pages");
+        let judge = ScriptedJudge::with(&["DONE"]);
+        let _ = executed(&browser, &judge);
+        let navigations = browser.cdp_calls.lock().iter().filter(|m| *m == "Page.navigate").count();
+        assert_eq!(navigations, 3, "one load per viewport, so no viewport inherits another's clicks");
+    }
+
+    #[test]
+    fn a_failed_first_load_makes_every_viewport_inconclusive() {
+        let mut browser = FakeBrowser::new("first-load-fails");
+        browser.navigate_fail_at = Some(1);
+        let judge = ScriptedJudge::with(&["DONE"]);
+        let report = executed(&browser, &judge);
+        assert_eq!(report.viewports.len(), 3);
+        assert!(report.viewports.iter().all(|v| v.nav_failed.is_some()));
+        assert_eq!(*browser.labels.lock(), vec!["phone"], "nothing after the failed first load runs");
+        assert_eq!(report::verdict(&report).exit_code, 2);
+    }
+
+    #[test]
+    fn a_later_viewport_that_fails_to_load_is_inconclusive_on_its_own() {
+        let mut browser = FakeBrowser::new("tablet-load-fails");
+        browser.navigate_fail_at = Some(2);
+        let judge = ScriptedJudge::with(&["DONE"]);
+        let report = executed(&browser, &judge);
+        let named = |name: &str| report.viewports.iter().find(|v| v.viewport == name).unwrap();
+        assert!(
+            named("tablet").nav_failed.as_deref().unwrap_or("").contains("ERR_CONNECTION_REFUSED"),
+            "{:?}",
+            named("tablet").nav_failed
+        );
+        assert!(named("phone").nav_failed.is_none() && named("desktop").nav_failed.is_none());
+        assert!(named("desktop").probe.is_some(), "the viewport after the failed one still runs");
+    }
+
+    #[test]
+    fn a_fresh_page_per_viewport_keeps_the_section_scoped() {
+        let mut browser = FakeBrowser::new("section-fresh").route("__miniQA.sections", SECTIONS);
+        browser.strict_roots = true;
+        let judge = ScriptedJudge::with(&["DONE"]);
+        let mut cfg = config(&browser);
+        cfg.section = Some("Promotions".to_string());
+        let report = execute(&cfg, &browser, &judge);
+        assert!(
+            report.notes.iter().all(|n| !n.contains("judging the whole page")),
+            "every viewport must find the section again on its fresh page: {:?}",
+            report.notes
+        );
+        assert!(report.viewports.iter().all(|v| v.nav_failed.is_none()), "{:?}", report.notes);
     }
 
     #[test]
@@ -2007,7 +2149,7 @@ mod tests {
         let mut judge = ScriptedJudge::with(&["CLICK", "DONE"]);
         judge.mutate_p = 0.80;
         let report = executed(&browser, &judge);
-        assert!(browser.clicks.lock().is_empty(), "the click must never be dispatched");
+        assert_eq!(browser.pointer_inputs(), 0, "the click must never be dispatched");
         let step = report.viewports[0].steps.first().expect("the step is recorded");
         assert!(step.note.as_deref().unwrap_or("").contains("safety gate"), "{:?}", step.note);
         assert_eq!(step.target_label.as_deref(), Some("Filters"));
@@ -2019,7 +2161,8 @@ mod tests {
         let mut judge = ScriptedJudge::with(&["CLICK", "DONE"]);
         judge.mutate_p = 0.02;
         let report = executed(&browser, &judge);
-        assert_eq!(browser.clicks.lock().len(), 1);
+        assert_eq!(browser.taps.lock().len(), 1);
+        assert!(browser.clicks.lock().is_empty());
         assert_eq!(report.viewports[0].steps[0].target_id.as_deref(), Some("e1"));
     }
 
@@ -2139,7 +2282,7 @@ mod tests {
         assert!(report.viewports.iter().all(|v| v.nav_failed.is_some()));
         assert_eq!(report::verdict(&report).exit_code, 2);
         assert!(report.notes.iter().any(|n| n.contains("could not be armed")), "{:?}", report.notes);
-        assert!(browser.clicks.lock().is_empty(), "nothing may be driven without a firewall");
+        assert_eq!(browser.pointer_inputs(), 0, "nothing may be driven without a firewall");
     }
 
     #[test]
@@ -2148,7 +2291,7 @@ mod tests {
         let browser = FakeBrowser::new("forbidden").route("__miniQA.snapshot", &observation);
         let judge = ScriptedJudge::with(&["CLICK", "DONE"]);
         let report = executed(&browser, &judge);
-        assert!(browser.clicks.lock().is_empty(), "a checkout page must never be clicked");
+        assert_eq!(browser.pointer_inputs(), 0, "a checkout page must never be clicked");
         let fact = report.viewports[0]
             .findings
             .iter()
@@ -2156,6 +2299,19 @@ mod tests {
             .expect("the refusal is reported");
         assert_eq!(fact.severity, 0);
         assert!(report.notes.iter().any(|n| n.contains("exploration skipped")), "{:?}", report.notes);
+    }
+
+    #[test]
+    fn a_skipped_exploration_is_not_marked_explored() {
+        let observation = OBSERVATION.replace("/promotions", "/checkout");
+        let browser = FakeBrowser::new("forbidden-not-explored").route("__miniQA.snapshot", &observation);
+        let judge = ScriptedJudge::with(&["CLICK", "DONE"]);
+        let report = executed(&browser, &judge);
+        assert!(
+            report.viewports.iter().all(|v| !v.explored),
+            "exploration was skipped on a checkout page: {:?}",
+            report.viewports.iter().map(|v| (&v.viewport, v.explored)).collect::<Vec<_>>()
+        );
     }
 
     #[test]
@@ -2243,7 +2399,7 @@ mod tests {
         let judge = ScriptedJudge::with(&["CLICK", "DONE"]);
         *judge.bad_target_once.lock() = true;
         let report = executed(&browser, &judge);
-        assert_eq!(browser.clicks.lock().len(), 1, "the retry must recover the step");
+        assert_eq!(browser.taps.lock().len(), 1, "the retry must recover the step");
         assert_eq!(report.viewports[0].steps[0].target_id.as_deref(), Some("e1"));
         assert!(judge.calls() > 1);
     }
@@ -2264,7 +2420,7 @@ mod tests {
             .route("__miniQA.hitTest", r#"{"ok":true,"x":0,"y":0,"topmost":false,"reason":"covered by div.overlay"}"#);
         let judge = ScriptedJudge::with(&["CLICK", "CLICK", "CLICK", "CLICK", "DONE"]);
         let report = executed(&browser, &judge);
-        assert!(browser.clicks.lock().is_empty(), "a covered control is never clicked");
+        assert_eq!(browser.pointer_inputs(), 0, "a covered control is never clicked");
         // Escape is pressed when a click is refused, and again before the
         // resting probe; each press is a keyDown + keyUp pair.
         let escapes = browser.cdp_calls.lock().iter().filter(|m| *m == "Input.dispatchKeyEvent").count();
