@@ -228,4 +228,30 @@
       return { ok: false, error: String((e && e.message) || e) };
     }
   };
+
+  // Tap-flow state for src/qa/mobile.rs: what is open, whether the page can
+  // scroll, and where we are. Large fixed layers count as overlays so a
+  // bottom sheet without role=dialog does not look like a leaked lock.
+  QA.mobileState = function () {
+    try {
+      const dialogs = [...document.querySelectorAll('[role="dialog"],dialog[open],[aria-modal="true"]')]
+        .filter((el) => {
+          const r = el.getBoundingClientRect();
+          return r.width > 0 && r.height > 0 && dom.visible(el);
+        })
+        .map((el) => dom.cssPath(el));
+      const layers = findFixedOverlays(document.body).map((item) => item.path);
+      const hidden = (el) => !!el && ['hidden', 'clip'].includes(getComputedStyle(el).overflowY);
+      return {
+        ok: true,
+        path: location.pathname + location.search,
+        open_overlays: [...new Set([...dialogs, ...layers])],
+        scroll_locked: hidden(document.body) || hidden(document.documentElement),
+        doc_height: document.documentElement.scrollHeight,
+        inner_height: innerHeight,
+      };
+    } catch (e) {
+      return { ok: false, error: String((e && e.message) || e) };
+    }
+  };
 })();

@@ -269,8 +269,9 @@ pub fn execute(cfg: &QaConfig, browser: &dyn Browser, judge: &dyn Judge) -> QaRe
                 facts.findings.push(forbidden_page_fact(vp, &observation.url));
             } else {
                 facts.explored = true;
-                let exploration = pass.explore(&goal_label, root.as_deref(), &observation);
+                let exploration = pass.explore(vp, &goal_label, root.as_deref(), &observation);
                 facts.steps = exploration.steps;
+                facts.findings.extend(exploration.facts);
                 if let Some(url) = exploration.forbidden {
                     facts.findings.push(forbidden_page_fact(vp, &url));
                 }
@@ -410,6 +411,8 @@ struct Exploration {
     forbidden: Option<String>,
     /// Covering elements that refused clicks, deduped in order.
     refusals: Vec<String>,
+    /// Tap-flow facts computed in code after each step (touch viewports only).
+    facts: Vec<Finding>,
 }
 
 /// The element the model's choice resolved to. `skip` means policy refused the
@@ -571,9 +574,20 @@ impl<'a> Pass<'a> {
         true
     }
 
+    /// Tap-flow state of the page (open overlays, scroll lock, path). Touch viewports
+    /// only; `None` when the page cannot answer, so a rule never fires on a guess.
+    fn mobile_state(&mut self) -> Option<crate::qa::mobile::MobileState> {
+        if !self.vp_mobile {
+            return None;
+        }
+        let raw = self.browser.eval("window.__miniQA.mobileState()").ok()?;
+        crate::qa::mobile::parse(&raw).ok()
+    }
+
     /// Q-B: exercise the section's controls, one operation per step.
     fn explore(
         &mut self,
+        vp: &Viewport,
         goal: &str,
         root: Option<&str>,
         first: &Observation,
@@ -588,6 +602,7 @@ impl<'a> Pass<'a> {
         let mut refusals: Vec<String> = Vec::new();
         let mut stop = None;
         let mut forbidden: Option<String> = None;
+        let mut facts: Vec<Finding> = Vec::new();
         let goal = format!(
             "Exercise the controls in {goal} as seen on a {} viewport and report anything that misbehaves.",
             self.vp_name
@@ -675,6 +690,7 @@ impl<'a> Pass<'a> {
                     if let Some(reason) = performed.skip {
                         record.note = Some(reason);
                     } else {
+                        let before = self.mobile_state();
                         let _ = self.browser.eval("window.__miniQA.arm()");
                         let acted = self.act(&operation.choice, performed.target_id.as_deref(), performed.text.as_deref());
                         if let Err(e) = acted {
@@ -712,6 +728,15 @@ impl<'a> Pass<'a> {
                             }
                             Err(e) => {
                                 record.note = Some(format!("snapshot after the step failed: {e}"));
+                            }
+                        }
+                        if let (Some(before), Some(after)) = (before, self.mobile_state()) {
+                            let shot = format!("shots/{}-step-{step:02}.jpg", self.vp_name);
+                            for f in crate::qa::mobile::judge(&before, &after, vp, step, &shot) {
+                                // A leaked lock stays leaked: one bug is one finding, kept at the step that caused it.
+                                if !facts.iter().any(|g| g.title == f.title && g.dom_path == f.dom_path) {
+                                    facts.push(f);
+                                }
                             }
                         }
                         if record.page_changed {
@@ -794,7 +819,7 @@ impl<'a> Pass<'a> {
                 break;
             }
         }
-        Exploration { steps: history, stop, forbidden, refusals }
+        Exploration { steps: history, stop, forbidden, refusals, facts }
     }
 
     /// Maps the winning operation + target answer onto the element to touch.
@@ -1762,6 +1787,10 @@ mod tests {
         snapshot_after: Option<String>,
         snapshots: std::sync::atomic::AtomicUsize,
         cdp_calls: Mutex<Vec<String>>,
+        /// Queued `__miniQA.mobileState()` replies: each call takes the head until one is
+        /// left, and that last one repeats. Empty = the default `{"ok":true}`, so no
+        /// tap-flow rule can fire.
+        mobile_states: Mutex<Vec<String>>,
         /// Fail the Nth `Page.navigate` (1-based) with a connection error.
         navigate_fail_at: Option<usize>,
         navigations: std::sync::atomic::AtomicUsize,
@@ -1794,6 +1823,7 @@ mod tests {
                 snapshot_after: None,
                 snapshots: std::sync::atomic::AtomicUsize::new(0),
                 cdp_calls: Mutex::new(Vec::new()),
+                mobile_states: Mutex::new(Vec::new()),
                 navigate_fail_at: None,
                 navigations: std::sync::atomic::AtomicUsize::new(0),
                 strict_roots: false,
@@ -1850,6 +1880,15 @@ mod tests {
             }
             if js.contains("__miniQA.hitTest") {
                 return HIT.to_string();
+            }
+            if js.contains("__miniQA.mobileState") {
+                let mut q = self.mobile_states.lock();
+                if q.len() > 1 {
+                    return q.remove(0);
+                }
+                if let Some(last) = q.first() {
+                    return last.clone();
+                }
             }
             r#"{"ok":true}"#.to_string()
         }
@@ -2039,6 +2078,42 @@ mod tests {
         assert_eq!(goals.len(), 2, "{goals:?}");
         assert!(goals[0].contains("as seen on a phone viewport"), "{}", goals[0]);
         assert!(goals[1].contains("as seen on a desktop viewport"), "{}", goals[1]);
+    }
+
+    #[test]
+    fn a_phone_step_that_leaks_a_scroll_lock_fails_the_run() {
+        let browser = FakeBrowser::new("scroll-lock");
+        *browser.mobile_states.lock() = vec![
+            r#"{"ok":true,"path":"/","open_overlays":[],"scroll_locked":false,"doc_height":3000,"inner_height":844}"#.to_string(),
+            r#"{"ok":true,"path":"/","open_overlays":[],"scroll_locked":true,"doc_height":3000,"inner_height":844}"#.to_string(),
+        ];
+        let mut judge = ScriptedJudge::with(&["CLICK", "DONE"]);
+        judge.mutate_p = 0.02;
+        let report = executed(&browser, &judge);
+        let phone = report.viewports.iter().find(|v| v.viewport == "phone").unwrap();
+        let fact = phone.findings.iter().find(|f| f.id == "phone-scroll-lock-leaked-1").expect("rule R1 fired");
+        assert_eq!(fact.severity, 2);
+        assert_eq!(fact.screenshot.as_deref(), Some("shots/phone-step-01.jpg"));
+        let desktop = report.viewports.iter().find(|v| v.viewport == "desktop").unwrap();
+        assert!(desktop.findings.iter().all(|f| !f.id.contains("scroll-lock")), "rules run on touch viewports only");
+        assert_eq!(crate::qa::report::verdict(&report).exit_code, 1);
+    }
+
+    #[test]
+    fn a_scroll_lock_that_stays_leaked_is_reported_once() {
+        let browser = FakeBrowser::new("scroll-lock-once");
+        *browser.mobile_states.lock() = vec![
+            r#"{"ok":true,"path":"/","open_overlays":[],"scroll_locked":false,"doc_height":3000,"inner_height":844}"#.to_string(),
+            r#"{"ok":true,"path":"/","open_overlays":[],"scroll_locked":true,"doc_height":3000,"inner_height":844}"#.to_string(),
+        ];
+        let mut judge = ScriptedJudge::with(&["CLICK", "SCROLL_DOWN", "DONE"]);
+        judge.mutate_p = 0.02;
+        let report = executed(&browser, &judge);
+        let phone = report.viewports.iter().find(|v| v.viewport == "phone").unwrap();
+        assert_eq!(phone.steps.len(), 3, "{:?}", phone.steps);
+        let leaks: Vec<&Finding> = phone.findings.iter().filter(|f| f.title.starts_with("Scroll lock leaked")).collect();
+        assert_eq!(leaks.len(), 1, "a lock that stays leaked is one bug, not one per step: {leaks:?}");
+        assert_eq!(leaks[0].step, Some(1), "the first step that leaked the lock keeps the finding");
     }
 
     #[test]

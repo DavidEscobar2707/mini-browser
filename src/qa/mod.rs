@@ -8,6 +8,7 @@
 //!                In-process (`ICoreWebView2::CallDevToolsProtocolMethod`), no socket.
 //!   agent.rs     the loop: viewports -> settle -> probe -> explore -> triage -> claims -> report.
 //!   jev.rs       Jev client (api.typesafe.ai) + typed answer validation, implements [`Judge`].
+//!   mobile.rs    tap-flow rules over before/after page state (pure).
 //!   questions.rs question builders: Q-A section, Q-B exploration, Q-C triage, claims.
 //!   probes.rs    parsers for the JS payloads (observation, probe, sections, hit-test, act log).
 //!   firewall.rs  mutation-firewall policy + first-party / blocklist predicates (pure).
@@ -20,6 +21,7 @@ pub mod agent;
 pub mod bridge;
 pub mod firewall;
 pub mod jev;
+pub mod mobile;
 pub mod probes;
 pub mod questions;
 pub mod report;

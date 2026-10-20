@@ -1,0 +1,32 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Mobile fixture</title>
+<style>
+  body { margin: 0; font-family: system-ui; }
+  header { position: sticky; top: 0; background: #456796; color: #fff; padding: 12px; display: flex; justify-content: space-between; }
+  button { font: inherit; min-width: 44px; min-height: 44px; }
+  main { padding: 16px; }
+  .tall { height: 2600px; background: linear-gradient(#eee, #999); }
+  dialog { border: 0; padding: 24px; width: 80vw; }
+  dialog::backdrop { background: rgba(0,0,0,.4); }
+</style></head>
+<body>
+<header><strong>Fixture</strong><button id="menu" aria-label="Open menu">Menu</button></header>
+<main>
+  <h1>Mobile tap-flow fixture</h1>
+  <p>Open the menu, then tap About. The bug: the sheet closes but the scroll lock stays.</p>
+  <div class="tall"></div>
+  <h2 id="about">About</h2>
+</main>
+<dialog id="sheet" aria-label="Menu">
+  <p><a id="about-link" href="#about">About</a></p>
+  <p><button id="close">Close</button></p>
+</dialog>
+<script>
+  const sheet = document.getElementById('sheet');
+  document.getElementById('menu').addEventListener('click', () => { sheet.showModal(); document.body.style.overflow = 'hidden'; });
+  document.getElementById('close').addEventListener('click', () => { sheet.close(); document.body.style.overflow = ''; });
+  // BUG under test: closes the dialog but never releases the scroll lock.
+  document.getElementById('about-link').addEventListener('click', () => { sheet.close(); });
+</script>
+</body></html>
