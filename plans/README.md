@@ -19,7 +19,7 @@ Product intent these plans serve: a coding agent working on a local app keeps on
 | 008 | No false success, opener that fires, fair goal check | P1 | S | 007 | IN PROGRESS |
 
 | 009 | Desktop move: Jev picks the control in native apps (`mini --desk`) | P1 | L | 008 | DONE (live: Calculator 7x12=84, 6 Jev calls, 17 s; Settings Bluetooth, 2 calls) |
-| 010 | Mobile-first QA: phone first, touch, tap-flow rules; `--device` Android lane | P1 | L | 008 | A DONE (phone-first, touch, tap-flow rules; 305 tests) / B TODO |
+| 010 | Mobile-first QA: phone first, touch, tap-flow rules; `--device` Android lane | P1 | L | 008 | DONE (A: phone-first, touch, tap-flow rules; B: `--device` real Chrome on Android, live on the Pixel 8 AVD; 349 tests) |
 
 Status values: TODO | IN PROGRESS | DONE | BLOCKED (with one-line reason) | REJECTED (with one-line rationale — finding fixed independently or approach abandoned)
 

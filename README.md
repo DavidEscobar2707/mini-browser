@@ -133,6 +133,11 @@ across navigation) run after each explored step and fail the run at severity 2.
 Step screenshots are `shots/<viewport>-step-NN.jpg`. The wall clock is 240 s
 plus 120 s for each explored viewport after the first.
 
+Real Chrome on Android: add `--device emulator` (the `mini-qa` AVD, booted
+headless when needed) or `--device auto` (a phone on USB with Chrome). The same
+loop runs on the real screen through `adb forward` + CDP; loopback URLs reach
+the laptop through `adb reverse`. Writes are always refused there.
+
 Needs a Jev key (see [Jev API key](#jev-api-key)). Single engine (WebView2/Chromium):
 visual-only regressions and non-Chromium differences are out of scope — the
 screenshots are there so a human can look.

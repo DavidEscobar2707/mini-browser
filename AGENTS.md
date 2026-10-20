@@ -70,6 +70,48 @@ target\debug\mini.exe --qa <url> [--section "<name>"] [--claim "<text>"]... [--o
   user agent at phone size, a tap that fires `touchstart` and ends in a click,
   and the restore at desktop size.
 
+# Device QA: `mini --qa <url> --device auto|emulator|<serial>`
+
+The same QA loop (settle, probe, Jev exploration, tap-flow rules, firewall,
+recorder, report) in real Chrome for Android. Mini is the CDP client; the
+device is the only viewport (`device`), nothing is emulated.
+
+```
+target\debug\mini.exe --qa <url> --device emulator [--steps N] [--section "<name>"] [--claim "<text>"]... [--out <dir>]
+```
+
+- Needs the Android SDK `platform-tools` (`adb`) at `ANDROID_SDK_ROOT`,
+  `ANDROID_HOME` or `%LOCALAPPDATA%\Android\Sdk`, and a device with Chrome:
+  a phone with USB debugging on (`--device auto` or `--device <serial>`), or
+  the AVD `mini-qa` (`--device emulator`; Mini boots it headless when no
+  emulator is online; `MINI_AVD` names another AVD, `MINI_EMU_WINDOW=1` shows
+  its window). A `google_apis` image has no Chrome; use `google_apis_playstore`
+  and tap through Chrome's first-run screens once.
+- Flow: `adb forward tcp:9333 localabstract:chrome_devtools_remote`
+  (`MINI_DEVICE_PORT`), Chrome opened on `about:blank`, DevTools polled up to
+  15 s, the `about:blank` tab picked by URL. A loopback URL
+  (`localhost:3000`, `127.0.0.1:8000`) is reached through `adb reverse`, so the
+  page keeps `localhost` as its origin.
+- Page scripts and the recorder go in through `Page.addScriptToEvaluateOnNewDocument`;
+  recorder lines come back through `Runtime.addBinding` (`__miniPost`);
+  the write firewall is `Fetch.enable` on the device. Service-worker requests
+  are not intercepted, so `--allow-writes` is refused with `--device`.
+  Cookies and cache are cleared at connect (on a phone this signs Chrome out).
+- Taps are `Input.dispatchTouchEvent`; Chrome answers `touchEnd` before it
+  dispatches the click (about 240 ms in a fresh tab), so a tap waits for the
+  page's click (max 1 s) before the next snapshot. The device clock can be
+  seconds off the host: facts and steps are stamped with the device clock
+  (`Browser::clock_ms`); the offset is printed to stderr.
+- Report: `- Device: AVD mini-qa (emulator-5554), Android 16`,
+  `- Engine: Chrome/133.0.6943.137 on ...`, `- Viewports: device (explored)`,
+  shots `shots/device.jpg` and `shots/device-step-NN.jpg`, streams under
+  `runs/run-001-device/`. Exit codes as for `--qa`. Every run leaves its
+  Chrome tab open on the device.
+- Measured 2026-10-20 (Pixel 8 AVD, Chrome 133, Android 16, 412x784 CSS px):
+  fixture `mobile.html` 4 Jev calls, 8.6 s, scroll-lock finding at step 2;
+  OhhLook `next dev` 12 steps, 79 s, 13 Jev calls, 2-4 s per step, plus a
+  clipped hero band (425 > 412 px) that the 390 px WebView2 phone did not show.
+
 # Debugging Mini pages: use the built-in debug mode, not Playwright
 
 Mini is a WebView2 (wry) browser. Playwright cannot launch it, and spawning a
